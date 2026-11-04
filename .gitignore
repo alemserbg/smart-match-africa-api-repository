@@ -1,0 +1,14 @@
+# Ignore the virtual environment
+Game/
+venv/
+.venv/
+
+# Ignore sensitive credentials
+.env
+
+# Ignore PyCharm configuration files
+.idea/
+
+# Ignore Python cache files
+**/__pycache__/
+*.pyc

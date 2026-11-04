@@ -1,0 +1,53 @@
+# ==========================================
+# CORE WEB & API FRAMEWORKS
+# ==========================================
+fastapi
+uvicorn
+aiohttp
+httpx>=0.24,<0.28
+httpcore
+requests
+
+# ==========================================
+# TELEGRAM BOT SDK
+# ==========================================
+python-telegram-bot
+
+# ==========================================
+# DATABASE, CACHE & CLOUD STORAGE
+# ==========================================
+supabase
+redis>=4.2.0
+asyncpg
+boto3
+botocore
+
+# ==========================================
+# CONFIGURATION & DATA VALIDATION
+# ==========================================
+pydantic
+pydantic-settings
+python-dotenv
+
+# ==========================================
+# ARTIFICIAL INTELLIGENCE & TRANSLATION SDKs
+# ==========================================
+google-genai
+sentence-transformers
+torch
+deep-translator
+googletrans
+
+# ==========================================
+# UTILITIES & SCRAPING
+# ==========================================
+beautifulsoup4
+backoff
+
+# ==========================================
+# TESTING & BUILD DEPENDENCIES
+# ==========================================
+pytest
+pytest-asyncio
+setuptools>=78.1.1
+wheel

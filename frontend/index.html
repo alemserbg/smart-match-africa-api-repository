@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html class="scroll-smooth" lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta content="width=device-width, initial-scale=1.0" name="viewport">
+    <meta content="Smart Match Africa: Decentralized multi-vertical asset matching (Housing, Vehicles, Equipment, Ride, Freight). Free for providers, secure escrow, smart negotiations via Telegram."
+          name="description">
+    <meta content="Logistics Africa, Freight Matching, Ride-Hailing, Equipment Rental, Real Estate Ethiopia, Smart Match Africa, Telegram Bot Marketplace"
+          name="keywords">
+    <meta content="Smart Match Africa Infrastructure Network" name="author">
+
+    <title>Smart Match Africa | Automated Multi-Vertical Asset & Services Matching Network</title>
+
+    <!-- Tailwind CSS Production Engine -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        brand: { blue: '#1d4ed8', blueDark: '#1e40af', orange: '#f97316', orangeDark: '#ea580c' }
+                    }
+                }
+            }
+        }
+    </script>
+
+    <!-- Alpine.js Core Engine -->
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <link href="/favicon.ico" rel="icon" type="image/x-icon">
+    <style>[x-cloak] { display: none !important; }</style>
+</head>
+<body class="bg-gray-50 text-gray-900 font-sans antialiased flex flex-col min-h-screen"
+      x-data="{ 
+          policyOpen: window.location.pathname.includes('/terms') || window.location.pathname.includes('/privacy') || new URLSearchParams(window.location.search).has('terms'), 
+          mobileMenuOpen: false,
+          currentLang: (() => {
+              const urlParams = new URLSearchParams(window.location.search);
+              const langParam = urlParams.get('lang');
+              if (['en', 'am', 'om'].includes(langParam)) return langParam;
+              return 'en';
+          })(),
+          translations: {
+              en: {
+                  services: 'Services & Assets',
+                  about: 'How It Works',
+                  policy: 'User Policy & Fees',
+                  cta: 'Launch Telegram Bot',
+                  heroTitle: 'The Smartest Way to Match Assets & Logistics',
+                  heroSub: 'Housing, Vehicles, Equipment, Rides & Freight. 100% free for asset providers. Buyers/renters negotiate via smart deals and pay commission only to unlock contacts.',
+                  providerFreeBadge: '🎉 100% Free Listing for Asset & Service Providers',
+                  modalTitle: 'Platform Terms, Policies & Commission Framework'
+              },
+              am: {
+                  services: 'አገልግሎቶች እና ንብረቶች',
+                  about: 'እንዴት እንደሚሰራ',
+                  policy: 'የአጠቃቀም መመሪያ እና ክፍያ',
+                  cta: 'ቴሌግራም ቦት ይክፈቱ',
+                  heroTitle: 'ንብረቶችን እና ሎጂስቲክስን ለማገናኘት በጣም ብልህ መንገድ',
+                  heroSub: 'ቤቶች፣ መኪኖች፣ ማሽኖች፣ ታክሲ እና ጭነት። ለአቅራቢዎች በሙሉ ነጻ! ተጫራቾች በስማርት ድርድር ተነጋግረው ኮሚሽን በመክፈል መረጃዎችን ይከፍታሉ።',
+                  providerFreeBadge: '🎉 ለንብረት አቅራቢዎች መዘርዘር እና ማከራየት 100% ነጻ ነው',
+                  modalTitle: 'የፕላትፎርም ደንቦች፣ መመሪያዎች እና የኮሚሽን ማዕቀፍ'
+              },
+              om: {
+                  services: 'Tajaajila & Qabeenya',
+                  about: 'Akkaata Inni Hojjatu',
+                  policy: 'Imaammata Fayyadamaa & Kaffaltii',
+                  cta: 'Botii Telegram Banaa',
+                  heroTitle: 'Karaa Bilchaataa Qabeenyaa fi Loojistiksii Walitti Fiduu',
+                  heroSub: 'Mana, Konkolaataa, Meeshaa, Tajaajila geejjibaa & Fe\'umsaa. Abbootii qabeenyaaf bilisa! Paartiileen daldalaa daldala smartiitiin walii galanii komishinii kaffalu.',
+                  providerFreeBadge: '🎉 Abbootii Qabeenyaaf Galmeessuun 100% Bilisa',
+                  modalTitle: 'Imaammata Fayyadamaa & Sirna Komishinii'
+              }
+          }
+      }">
+
+<!-- GLOBAL FIXED HEADER NAVIGATION -->
+<nav class="fixed w-full z-50 bg-white/90 backdrop-blur-md shadow-sm border-b border-gray-100 transition-all duration-300">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div class="flex justify-between items-center h-20">
+            <div class="flex-shrink-0 cursor-pointer text-2xl font-black tracking-tight text-blue-700"
+                 onclick="window.scrollTo({top: 0, behavior: 'smooth'})">
+                SmartMatch<span class="text-orange-500">Africa</span>
+            </div>
+
+            <div class="hidden md:flex space-x-8 items-center font-semibold">
+                <a class="text-gray-600 hover:text-blue-700 transition-colors" href="#services" x-text="translations[currentLang].services">Services</a>
+                <a class="text-gray-600 hover:text-blue-700 transition-colors" href="#about" x-text="translations[currentLang].about">How It Works</a>
+                <button @click="policyOpen = true" class="text-gray-600 hover:text-blue-700 transition-colors focus:outline-none" x-text="translations[currentLang].policy">User Policy</button>
+
+                <div class="relative flex items-center bg-gray-100 p-1 rounded-lg border border-gray-200 text-xs">
+                    <button :class="currentLang === 'en' ? 'bg-white shadow-sm text-blue-700 font-bold' : 'text-gray-500'" @click="currentLang = 'en'" class="px-2 py-1 rounded transition-all">EN</button>
+                    <button :class="currentLang === 'am' ? 'bg-white shadow-sm text-blue-700 font-bold' : 'text-gray-500'" @click="currentLang = 'am'" class="px-2 py-1 rounded transition-all">አም</button>
+                    <button :class="currentLang === 'om' ? 'bg-white shadow-sm text-blue-700 font-bold' : 'text-gray-500'" @click="currentLang = 'om'" class="px-2 py-1 rounded transition-all">OM</button>
+                </div>
+
+                <a class="bg-blue-700 text-white px-5 py-2.5 rounded-lg hover:bg-blue-800 transition-colors shadow-sm tracking-wide" href="https://t.me/SmartMatchAfricaBot" target="_blank" x-text="translations[currentLang].cta">Get Started</a>
+            </div>
+        </div>
+    </div>
+</nav>
+
+<!-- MAIN CONTENT MATRIX -->
+<main class="flex-grow pt-20">
+    <section class="relative bg-gradient-to-br from-slate-900 via-blue-950 to-blue-800 text-white overflow-hidden">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-24 md:py-36 relative z-10">
+            <div class="md:w-2/3">
+                <span class="inline-block bg-orange-500/20 text-orange-300 border border-orange-500/30 font-bold text-xs px-3 py-1.5 rounded-full mb-4" x-text="translations[currentLang].providerFreeBadge">
+                    🎉 100% Free Listing & Selling for Asset Providers
+                </span>
+                <h1 class="text-4xl md:text-6xl font-black tracking-tight leading-tight mb-6">
+                    <span x-text="translations[currentLang].heroTitle">The Smartest Way to Match</span> <span class="text-orange-400">Assets & Logistics</span>
+                </h1>
+                <p class="text-lg md:text-xl text-blue-100 mb-10 max-w-2xl font-normal leading-relaxed" x-text="translations[currentLang].heroSub">
+                    Connect securely via Telegram. Free for asset providers, transparent pricing, and secure negotiations.
+                </p>
+                <div class="flex flex-col sm:flex-row space-y-4 sm:space-y-0 sm:space-x-4">
+                    <a class="px-8 py-4 bg-orange-500 hover:bg-orange-600 text-white font-extrabold rounded-xl text-center transition-all shadow-lg" href="https://t.me/SmartMatchAfricaBot" target="_blank">Launch Telegram Bot</a>
+                    <a class="px-8 py-4 bg-white/10 hover:bg-white/20 border border-white/20 text-white font-bold rounded-xl text-center transition-all backdrop-blur-sm" href="#services">Explore Verticals</a>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- VERTICALS SECTION -->
+    <section class="py-24 bg-gray-50 border-b border-gray-100" id="services">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="text-center mb-20">
+                <h2 class="text-3xl md:text-4xl font-extrabold text-gray-900 tracking-tight mb-4">Multi-Vertical Smart Matching</h2>
+                <p class="text-gray-600 max-w-2xl mx-auto text-lg leading-relaxed">Providers list assets at <strong>0% cost</strong>. Seekers negotiate prices via smart deals and pay only the platform commission to unlock direct contacts.</p>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-5 gap-6">
+                <div class="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 hover:shadow-md transition-all">
+                    <div class="w-12 h-12 bg-blue-50 text-2xl rounded-xl flex items-center justify-center mb-4">🏠</div>
+                    <h3 class="text-lg font-bold text-gray-900 mb-1">Housing</h3>
+                    <p class="text-xs text-orange-600 font-bold mb-2">Sale & Rent</p>
+                    <p class="text-xs text-gray-600">Residential & commercial properties matched by area (m²) and location.</p>
+                </div>
+                <div class="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 hover:shadow-md transition-all">
+                    <div class="w-12 h-12 bg-blue-50 text-2xl rounded-xl flex items-center justify-center mb-4">🚗</div>
+                    <h3 class="text-lg font-bold text-gray-900 mb-1">Vehicles</h3>
+                    <p class="text-xs text-orange-600 font-bold mb-2">Sale & Rent</p>
+                    <p class="text-xs text-gray-600">Cars, vans, and commercial fleet vehicles for sale or rental.</p>
+                </div>
+                <div class="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 hover:shadow-md transition-all">
+                    <div class="w-12 h-12 bg-blue-50 text-2xl rounded-xl flex items-center justify-center mb-4">🏗️</div>
+                    <h3 class="text-lg font-bold text-gray-900 mb-1">Equipment</h3>
+                    <p class="text-xs text-orange-600 font-bold mb-2">Rentals Only</p>
+                    <p class="text-xs text-gray-600">Heavy construction machinery and agricultural tools rentals.</p>
+                </div>
+                <div class="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 hover:shadow-md transition-all">
+                    <div class="w-12 h-12 bg-blue-50 text-2xl rounded-xl flex items-center justify-center mb-4">🚕</div>
+                    <h3 class="text-lg font-bold text-gray-900 mb-1">Ride-Hailing</h3>
+                    <p class="text-xs text-orange-600 font-bold mb-2">Passenger Transit</p>
+                    <p class="text-xs text-gray-600">Secure passenger-driver matchmaking with OSRM telemetry.</p>
+                </div>
+                <div class="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 hover:shadow-md transition-all">
+                    <div class="w-12 h-12 bg-blue-50 text-2xl rounded-xl flex items-center justify-center mb-4">🚚</div>
+                    <h3 class="text-lg font-bold text-gray-900 mb-1">Freight</h3>
+                    <p class="text-xs text-orange-600 font-bold mb-2">Logistics Dispatch</p>
+                    <p class="text-xs text-gray-600">Heavy cargo transport matching and axle weight verification.</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- HOW IT WORKS -->
+    <section class="py-24 bg-white" id="about">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="text-center mb-16">
+                <h2 class="text-3xl font-extrabold text-gray-900">How Smart Negotiation & Commission Work</h2>
+                <p class="text-gray-600 mt-2">Transparent workflows aligned with our Telegram bot core engine.</p>
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-8">
+                <div class="bg-gray-50 p-6 rounded-xl border border-gray-200">
+                    <span class="text-blue-700 font-black text-xl">1. Free Listing & Smart Negotiation</span>
+                    <p class="text-sm text-gray-600 mt-2">Providers list assets/services at zero cost. Seekers and providers negotiate prices using the smart deals module to reach an agreement.</p>
+                </div>
+                <div class="bg-gray-50 p-6 rounded-xl border border-gray-200">
+                    <span class="text-blue-700 font-black text-xl">2. Commission Payment Only</span>
+                    <p class="text-sm text-gray-600 mt-2">No direct asset payments are made on the platform. The platform only collects the platform commission for viewing details and contact numbers, prompted by:</p>
+                    <blockquote class="mt-2 p-2 bg-blue-50 border-l-4 border-blue-600 text-xs italic text-blue-900">
+                        "To view details and contact information, please select a payment method below to pay the commission."
+                    </blockquote>
+                </div>
+                <div class="bg-gray-50 p-6 rounded-xl border border-gray-200">
+                    <span class="text-blue-700 font-black text-xl">3. Contact Dispatch & In-Person Finalization</span>
+                    <p class="text-sm text-gray-600 mt-2">Upon commission payment, contact info is dispatched. Final payments and delivery happen in person:</p>
+                    <ul class="list-disc pl-4 mt-2 text-xs space-y-1">
+                        <li><strong>Seeker:</strong> <em>"Directly contact the provider to arrange delivery. Thank you for using Smart Match Africa!"</em></li>
+                        <li><strong>Provider:</strong> <em>"Expect their call shortly, or contact them directly to get started. Thank you for using Smart Match Africa!"</em></li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </section>
+</main>
+
+<footer class="bg-slate-900 text-slate-400 py-12 border-t border-slate-800 text-center">
+    <button @click="policyOpen = true" class="text-white underline hover:text-orange-400 font-semibold text-sm">View User Policy & Terms</button>
+    <p class="text-xs text-slate-500 mt-2">&copy; 2026 Smart Match Africa Infrastructure Network. All rights reserved.</p>
+</footer>
+
+<!-- MASTER USER POLICY & TERMS MODAL LAYER -->
+<div @keydown.escape.window="policyOpen = false" class="fixed inset-0 z-50 overflow-y-auto" role="dialog" x-cloak x-show="policyOpen">
+    <div @click="policyOpen = false" class="fixed inset-0 bg-slate-950/80 backdrop-blur-sm"></div>
+    <div class="flex min-h-full items-center justify-center p-4 text-center">
+        <div class="relative transform overflow-hidden rounded-2xl bg-white text-left shadow-2xl w-full max-w-3xl border border-gray-100" x-show="policyOpen">
+            
+            <div class="bg-gray-50 px-6 py-4 border-b border-gray-200 flex items-center justify-between">
+                <h3 class="text-lg font-black text-slate-900 flex items-center space-x-2">
+                    <span>📜</span>
+                    <span x-text="translations[currentLang].modalTitle">Platform Terms, Policies & Commission Framework</span>
+                </h3>
+                <button @click="policyOpen = false" class="text-gray-400 hover:text-gray-600 font-bold text-lg">✕</button>
+            </div>
+
+            <!-- MULTILINGUAL POLICY BODY -->
+            <div class="px-6 py-6 max-h-[65vh] overflow-y-auto space-y-6 text-sm text-gray-600 leading-relaxed">
+                
+                <!-- ENGLISH POLICY CONTENT -->
+                <div x-show="currentLang === 'en'" class="space-y-4">
+                    <div>
+                        <h4 class="text-sm font-black text-gray-900 uppercase tracking-wider mb-1">1. 100% Free Listing Model for Providers</h4>
+                        <p>Asset providers (Housing sales/rentals, Vehicle sales/rentals, Equipment rentals, Ride-hailing drivers, and Freight carriers) can list, sell, or rent out their assets at <strong>zero cost</strong>. Buyers or renters agree to pay the platform service commission.</p>
+                    </div>
+                    <div>
+                        <h4 class="text-sm font-black text-gray-900 uppercase tracking-wider mb-1">2. Smart Negotiations & Commission-Only Payments</h4>
+                        <p>No direct asset or logistics payments are processed on the platform. The platform exclusively collects the platform commission for viewing details and contact numbers. 
+                        <br><strong>Guidance Prompt:</strong> <code>"To view details and contact information, please select a payment method below to pay the commission."</code>
+                        <br>The smart deals module enables parties to negotiate prices and reach a mutual agreement prior to commission payment.</p>
+                    </div>
+                    <div>
+                        <h4 class="text-sm font-black text-gray-900 uppercase tracking-wider mb-1">3. Contact Dispatch & In-Person Finalization</h4>
+                        <p>Upon successful commission payment, contact information is securely dispatched:</p>
+                        <ul class="list-disc pl-5 mt-1 space-y-1 text-xs">
+                            <li><strong>For Seeker:</strong> <code>"Directly contact the provider to arrange delivery. Thank you for using Smart Match Africa!"</code></li>
+                            <li><strong>For Provider:</strong> <code>"Expect their call shortly, or contact them directly to get started. Thank you for using Smart Match Africa!"</code></li>
+                        </ul>
+                        <p class="mt-2 text-xs">All final asset or service payments are completed securely in person between the parties.</p>
+                    </div>
+                </div>
+
+                <!-- AMHARIC POLICY CONTENT -->
+                <div x-show="currentLang === 'am'" class="space-y-4">
+                    <div>
+                        <h4 class="text-sm font-black text-gray-900 uppercase tracking-wider mb-1">1. ለአቅራቢዎች 100% ነጻ የዝርዝር (Listing) አገልግሎት</h4>
+                        <p>የንብረት አቅራቢዎች (የቤት ሽያጭ/ክራይ፣ የመኪና ሽያጭ/ክራይ፣ የከባድ ማሽኖች ክራይ፣ ታክሲ እና የጭነት አጓጓዦች) ንብረቶቻቸውን <strong>በሙሉ ነጻ</strong> መዘርዘር ወይም ማከራየት ይችላሉ። ገዢዎች ወይም ተከራዮች የፕላትፎርሙን አገልግሎት ኮሚሽን ይከፍላሉ።</p>
+                    </div>
+                    <div>
+                        <h4 class="text-sm font-black text-gray-900 uppercase tracking-wider mb-1">2. ስማርት ድርድር እና የኮሚሽን ክፍያ ብቻ</h4>
+                        <p>በፕላትፎርሙ ላይ ከኮሚሽን ውጭ ምንም ዓይነት ቀጥተኛ የንብረት ክፍያ አይፈጸምም። ፕላትፎርሙ የሚሰበስበው ዝርዝር መረጃዎችን እና ስልክ ቁጥር ለማሳየት የሚጠየቀውን ኮሚሽን ብቻ ነው።
+                        <br><strong>መመሪያው፦</strong> <code>"ዝርዝር መረጃዎችን እና የስልክ ቁጥር ለማየት፣ ኮሚሽኑን ለመክፈል ከታች ያለውን የክፍያ አማራጭ ይምረጡ።"</code>
+                        <br>ተሳታፊዎች በስማርት ድርድር ሞጁል አማካኝነት በዋጋ ላይ ተነጋግረው ስምምነት ላይ ይደርሳሉ።</p>
+                    </div>
+                    <div>
+                        <h4 class="text-sm font-black text-gray-900 uppercase tracking-wider mb-1">3. መረጃ መለዋወጥ እና በአካል መፈጸም</h4>
+                        <p>ኮሚሽኑ ከተከፈለ በኋላ የሁለቱም ወገኖች የስልክ ቁጥር እና ዝርዝር መረጃ ይላካል፦</p>
+                        <ul class="list-disc pl-5 mt-1 space-y-1 text-xs">
+                            <li><strong>ለፈላጊው/ገዢው፦</strong> <code>"አቅርቦቱን ለማስተካከል በቀጥታ ከአቅራቢው ጋር ይገናኙ። ስማርት ማች አፍሪካን ስለተጠቀሙ እናመሰግናለን!"</code></li>
+                            <li><strong>ለአቅራቢው/ሻጩ፦</strong> <code>"በቅርቡ ጥሪ ይጠብቁ፣ ወይም ለመጀመር በቀጥታ ያነጋግሯቸው። ስማርት ማች አፍሪካን ስለተጠቀሙ እናመሰግናለን!"</code></li>
+                        </ul>
+                        <p class="mt-2 text-xs">ቀሪው የክፍያ እና የማድረስ ስራ በአካል ይከናወናል።</p>
+                    </div>
+                </div>
+
+                <!-- AFAAN OROMOO POLICY CONTENT -->
+                <div x-show="currentLang === 'om'" class="space-y-4">
+                    <div>
+                        <h4 class="text-sm font-black text-gray-900 uppercase tracking-wider mb-1">1. Abbootii Qabeenyaaf Galmeessuun 100% Bilisa</h4>
+                        <p>Abbootiin qabeenyaa (Gurgurtaa/Kiree mana, Konkolaataa, Meeshalee ijaarsaa, Tajaajila geejjibaa & Fe'umsaa) qabeenya isaanii <strong>bilisaan</strong> galmeessuu danda'u. Bittaa/Kireeffataan komishinii tajaajilaa kaffalu.</p>
+                    </div>
+                    <div>
+                        <h4 class="text-sm font-black text-gray-900 uppercase tracking-wider mb-1">2. Daldala Smartii & Kaffaltii Komishinii Qofa</h4>
+                        <p>Kaffaltiin qabeenyaa kallattiin marsicharratti hin raawwatamu. Marsichi odeeffannoo fi lakkoofsa bilbilaa argamsiisuuf komishinii qofa sassaaba.
+                        <br><strong>Qajeelfama፦</strong> <code>"Odeeffannoo fi lakkoofsa bilbilaa argachuuf, kaffaltii komishinii raawwachuuf filannoo kaffaltii armaan gadii filadhaa."</code>
+                        <br>Paartiileen daldala smartiitiin gatiirratti walii galuudhaan komishinii kaffalu.</p>
+                    </div>
+                    <div>
+                        <h4 class="text-sm font-black text-gray-900 uppercase tracking-wider mb-1">3. Qunnamtii Erguu & Waliigaltee Kallattii</h4>
+                        <p>Kaffaltii komishinii booda odeeffannoon qunnamtii ni ergama:</p>
+                        <ul class="list-disc pl-5 mt-1 space-y-1 text-xs">
+                            <li><strong>Gaafataa/Bittaaf:</strong> <code>"Dhiyeessii qopheessuuf kallattiidhaan dhiyeessaa qunnamaa. Smart Match Africa fayyadamuu keessaniif galatoomaa!"</code></li>
+                            <li><strong>Dhiyeessaaf:</strong> <code>"Bilbila isaanii dafee eeggadhaa, ykn jalqabuuf kallattiidhaan isaan qunnamaa. Smart Match Africa fayyadamuu keessaniif galatoomaa!"</code></li>
+                        </ul>
+                        <p class="mt-2 text-xs">Kaffaltiin fi dhiyeessii dhumaa qaamaan raawwatama.</p>
+                    </div>
+                </div>
+
+            </div>
+
+            <div class="bg-gray-50 px-6 py-4 border-t border-gray-200 text-right flex justify-between items-center">
+                <span class="text-xs text-gray-500" x-text="'Active Language: ' + currentLang.toUpperCase()"></span>
+                <button @click="policyOpen = false" class="px-5 py-2.5 bg-blue-700 hover:bg-blue-800 text-white font-bold rounded-xl text-xs transition-all">Accept & Close</button>
+            </div>
+        </div>
+    </div>
+</div>
+</body>
+</html>

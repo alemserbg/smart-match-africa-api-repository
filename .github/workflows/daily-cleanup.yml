@@ -1,0 +1,45 @@
+name: Smart Match Africa - Daily Housekeeping Cleanup
+
+on:
+  schedule:
+    # Runs at 00:00 UTC every single day (3:00 AM East Africa Time)
+    - cron: '0 0 * * *'
+  workflow_dispatch: # Allows manual verification triggering from the GitHub UI
+
+jobs:
+  database-purge:
+    name: Execute Data Purging Protocol
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Trigger Remote Cron Endpoints
+        env:
+          PRODUCTION_API_URL: ${{ secrets.PRODUCTION_API_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          if [ -z "$PRODUCTION_API_URL" ] || [ -z "$SUPABASE_SERVICE_KEY" ]; then
+            echo "ERROR: Critical repository configuration secrets are missing."
+            exit 1
+          fi
+          
+          echo "Initiating daily automated database sweeping protocol..."
+          
+          # Strip out any pre-existing 'http://' or 'https://' from the secret to ensure URL safety
+          CLEAN_URL=$(echo "$PRODUCTION_API_URL" | sed -e 's|^[^/]*//||')
+          
+          echo "1. Running General Housekeeping Cleanup..."
+          curl -X POST "https://$CLEAN_URL/cron/housekeeping-cleanup" \
+               -H "Authorization: Bearer $SUPABASE_SERVICE_KEY" \
+               -H "Content-Type: application/json" \
+               -d '{}' \
+               --fail \
+               --show-error
+          
+          echo "2. Running 48-Hour Reservation Rollback..."
+          curl -X POST "https://$CLEAN_URL/cron/rollback-expired-reservations" \
+               -H "Authorization: Bearer $SUPABASE_SERVICE_KEY" \
+               -H "Content-Type: application/json" \
+               -d '{}' \
+               --fail \
+               --show-error
+
