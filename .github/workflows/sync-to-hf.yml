@@ -8,16 +8,14 @@ jobs:
   sync-to-hub:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          lfs: true
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: Push to Hugging Face Space
-        uses: huggingface/github-action@v6
+      - name: Sync to Hugging Face Hub
+        uses: huggingface/hub-sync@v0.3.0
         with:
-          token: ${{ secrets.HF_ACCESS_TOKEN }}
-          space: alemserbg/smart-match-africa
-          git_user_name: alemserbg
-          git_user_email: alemserbg@gmail.com
-          branch: main
+          github_repo_id: ${{ github.repository }}
+          huggingface_repo_id: alemserbg/smart-match-africa
+          hf_token: ${{ secrets.HF_ACCESS_TOKEN }}
+          repo_type: space
+          space_sdk: docker
