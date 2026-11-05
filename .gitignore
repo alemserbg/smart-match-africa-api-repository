@@ -12,3 +12,12 @@ venv/
 # Ignore Python cache files
 **/__pycache__/
 *.pyc
+
+# Ignore test files and testing directories
+tests/
+test/
+**/test_*.py
+**/*_test.py
+.pytest_cache/
+.coverage
+htmlcov/

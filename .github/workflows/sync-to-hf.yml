@@ -1,0 +1,21 @@
+name: Sync to Hugging Face Hub
+
+on:
+  push:
+    branches: [main] # Change to 'master' if your default branch is master
+
+jobs:
+  sync-to-hub:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: true
+
+      - name: Push to Hugging Face Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          git remote add space https://alemserbg:$HF_TOKEN@huggingface.co/spaces/alemserbg/smart-match-africa
+          git push --force space main:main

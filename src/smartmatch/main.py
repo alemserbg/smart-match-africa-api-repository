@@ -54,6 +54,7 @@ from redis.exceptions import ConnectionError as RedisConnectionError
 
 # --- CORE PLATFORM INTEGRATION SETTINGS ---
 from src.smartmatch.config import settings
+from src.smartmatch.location_service import run_location_worker
 
 # --- SYSTEMIC ENGINE SERVICES ---
 from src.smartmatch.services.db_manager import DatabaseManager
@@ -1505,7 +1506,7 @@ async def master_lifespan(_app: FastAPI):
             aws_secret_key=settings.B2_APPLICATION_KEY,
             region_name="eu-central-003",
             bucket_name="sma-assets-image-bucket",
-            endpoint_url=endpoint
+            endpoint_url=endpoint  # <-- Fixed: use the local variable here instead of settings.B2_ENDPOINT_URL
         )
 
         ai_engine = SmartMatchAIEngine()
@@ -1533,6 +1534,14 @@ async def master_lifespan(_app: FastAPI):
 
         currency_interval = getattr(settings, 'CURRENCY_SYNC_INTERVAL_SECONDS', 21600)
         await queue_manager.start_currency_worker(db_client=supabase_client, interval_seconds=currency_interval)
+
+        # ==========================================
+        # 📍 START TELETHON LOCATION TRACKING WORKER
+        # ==========================================
+        location_worker_task = asyncio.create_task(run_location_worker())
+        background_tasks.add(location_worker_task)
+        location_worker_task.add_done_callback(background_tasks.discard)
+        logger.info("📍 Telethon location tracking background daemon initiated successfully.")
 
         # ==========================================
         # 🔄 STARTUP RECOVERY: RESUME PENDING DISPATCHES
@@ -1636,7 +1645,7 @@ async def master_lifespan(_app: FastAPI):
             background_tasks.add(pulse_task)
             pulse_task.add_done_callback(background_tasks.discard)
 
-        logger.info("🚀 Core System Online. Web services active; non-blocking warmups running.")
+        logger.info("🚀 Core System Online. Web services active; non-blocking warmups & location worker running.")
         yield
 
     except Exception as startup_error:

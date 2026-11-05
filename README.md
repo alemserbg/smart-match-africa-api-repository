@@ -1,2 +1,8 @@
-# smart-match-africa-api-repository
-Repository of Smart Match Africa Assets &amp; Logistics
+---
+title: Smart Match Africa API
+emoji: 🚀
+colorFrom: blue
+colorTo: indigo
+sdk: docker
+app_port: 7860
+---

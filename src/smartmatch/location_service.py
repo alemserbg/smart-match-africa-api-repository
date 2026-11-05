@@ -165,7 +165,8 @@ async def handle_location_update(event: events.MessageEdited.Event) -> None:
                      exc_info=True)
 
 
-async def main() -> None:
+# Change from: async def main() -> None:
+async def run_location_worker() -> None:
     """
     Master entry point and execution supervisor for the location tracking daemon.
     """
@@ -209,7 +210,7 @@ async def main() -> None:
 
 if __name__ == '__main__':
     try:
-        asyncio.run(main())
+        asyncio.run(run_location_worker())
     except KeyboardInterrupt:
         logger.info("\n🛑 Tracking background process gracefully interrupted by operational command.")
     except SystemExit as sys_exit:
