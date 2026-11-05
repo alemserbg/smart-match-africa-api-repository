@@ -13,16 +13,17 @@ services:
     # Uvicorn entry point aligned with the 'src.' directory package layout
     startCommand: "uvicorn src.smartmatch.main:app --host 0.0.0.0 --port $PORT"
 
-    # Render assigns PORT dynamically; uvicorn binds to it automatically
-    envVars:
+envVars:
       - key: PYTHON_VERSION
         value: 3.11.0
       - key: DEBUG_MODE
         value: "false"
       - key: SERVER_PORT
-        value: "10000" # Standard default, overridden by Render's runtime PORT
+        value: "10000"
       - key: BASE_URL
-        value: "https://guzoplus.onrender.com"
+        value: "https://smart-match-africa-gateway-ijg3.onrender.com"
+      - key: PRODUCTION_API_URL
+        value: "https://smart-match-africa-gateway-ijg3.onrender.com"
 
       # Telegram & AI Credentials
       - key: TELEGRAM_TOKEN
