@@ -14,8 +14,10 @@ jobs:
           lfs: true
 
       - name: Push to Hugging Face Space
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: |
-          git remote add space https://alemserbg:$HF_TOKEN@huggingface.co/spaces/alemserbg/smart-match-africa
-          git push --force space main:main
+        uses: huggingface/github-action@v6
+        with:
+          token: ${{ secrets.HF_ACCESS_TOKEN }}
+          space: alemserbg/smart-match-africa
+          git_user_name: alemserbg
+          git_user_email: alemserbg@gmail.com
+          branch: main
