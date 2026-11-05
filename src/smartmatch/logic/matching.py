@@ -1,4 +1,3 @@
-import os
 import logging
 import asyncio
 import inspect
@@ -8,7 +7,6 @@ import difflib
 import json
 import requests
 from functools import lru_cache
-import torch
 import socket
 from typing import Dict, Any, List, Optional, Tuple
 import re
@@ -102,32 +100,6 @@ async def init_redis_cache(redis_url: Optional[str] = None, max_attempts: int = 
         redis_client = None
 
 
-# ==========================================
-# 5. Environment Configuration for Hugging Face
-# ==========================================
-
-# Allow a small number of retries (e.g., 2 or 3) to protect against temporary network blips on Render
-os.environ["HF_HUB_MAX_RETRIES"] = "3"
-
-# Safely load the Hugging Face token from Render's environment variables.
-# (Since all-MiniLM-L6-v2 is public, an absent token will not block downloads).
-hf_token = os.getenv("HF_TOKEN")
-if hf_token:
-    os.environ["HF_TOKEN"] = hf_token
-
-# ==========================================
-# 6. Conditionally import sentence-transformers
-# ==========================================
-try:
-    from sentence_transformers import SentenceTransformer, util
-
-    HAS_SEMANTICS = True
-except ImportError:
-    SentenceTransformer = None
-    util = None
-    HAS_SEMANTICS = False
-    logger.warning("sentence-transformers not installed. Falling back to strict string matching.")
-
 SHARED_CITY_SYNONYMS = {
     # Addis Ababa Region / Sheger
     "addis ababa": "addis_ababa", "አዲስ አበባ": "addis_ababa", "አዲስ አበበ": "addis_ababa", "finfinne": "addis_ababa", "finfinnee": "addis_ababa", "sheger": "addis_ababa", "ሸገር": "addis_ababa",
@@ -173,134 +145,88 @@ SHARED_LOCATION_STOPWORDS = {
     "port", "seeker"
 }
 
+# ==========================================
+# 5. Environment & Semantic AI Bypass (RAM Optimized)
+# ==========================================
+
+# Force-disable semantic heavy models to fit Render 512MB RAM free limit
+HAS_SEMANTICS = False
+SentenceTransformer = None
+util = None
+logger.info("⚡ Lightweight production mode: Semantic AI model loading disabled to conserve RAM.")
+
 
 # ==========================================
-# SEMANTIC MATCHING AI ENGINE
+# SEMANTIC MATCHING AI ENGINE (LIGHTWEIGHT FALLBACK)
 # ==========================================
 class SemanticMatcher:
     """
-    Singleton AI model manager for semantic similarity.
-    Loads the model once into memory and utilizes hardware acceleration if available.
+    Lightweight mock manager preserving all structural hooks and method signatures
+    while utilizing strict string and token matching to operate with near-zero RAM.
     """
     model = None
 
     @classmethod
     def load_model(cls):
-        if HAS_SEMANTICS and cls.model is None:
-            try:
-                device = (
-                    "cuda" if torch.cuda.is_available()
-                    else "mps" if torch.backends.mps.is_available()
-                    else "cpu"
-                )
-                logger.info(f"Loading Semantic AI Model ('all-MiniLM-L6-v2') on {device.upper()}...")
-
-                # Attempt strictly offline loading first to avoid HTTP calls
-                try:
-                    cls.model = SentenceTransformer(
-                        'all-MiniLM-L6-v2',
-                        device=device,
-                        token=os.environ.get("HF_TOKEN"),
-                        local_files_only=True
-                    )
-                except Exception as offline_err:
-                    logger.warning(f"Local cache load failed ({offline_err}). Retrying standard load...")
-                    cls.model = SentenceTransformer(
-                        'all-MiniLM-L6-v2',
-                        device=device,
-                        token=os.environ.get("HF_TOKEN")
-                    )
-
-                logger.info("Semantic AI Model successfully initialized.")
-            except Exception as e:
-                logger.error(f"Failed to load Semantic Model: {e}")
+        # Intentionally a no-op to prevent loading torch & sentence-transformers into RAM
+        pass
 
     @classmethod
     @lru_cache(maxsize=2048)
-    def _get_cached_embedding(cls, text: str) -> Optional[torch.Tensor]:
-        """Encodes text into a vector tensor with LRU caching."""
-        if not cls.model:
-            return None
-        return cls.model.encode(
-            text,
-            convert_to_tensor=True,
-            show_progress_bar=False
-        )
+    def _get_cached_embedding(cls, _text: str) -> Optional[Any]:
+        """Mock method for embedding generation returning None."""
+        return None
 
     @classmethod
     def is_functionally_similar(cls, text1: str, text2: str, threshold: float = 0.65) -> bool:
-        """Evaluates two strings using LRU-cached embeddings and strict word matching."""
+        """Evaluates strings using a token overlap ratio checked against the threshold."""
         if not text1 or not text2:
             return False
 
         t1, t2 = str(text1).lower().strip(), str(text2).lower().strip()
-
         if t1 == t2:
             return True
 
         words1, words2 = set(t1.split()), set(t2.split())
+        if not words1 or not words2:
+            return False
+
         if words1.issubset(words2) or words2.issubset(words1):
             return True
 
-        if cls.model:
-            try:
-                emb1 = cls._get_cached_embedding(t1)
-                emb2 = cls._get_cached_embedding(t2)
-                if emb1 is not None and emb2 is not None:
-                    score = util.cos_sim(emb1, emb2).item()
-                    return score >= threshold
-            except Exception as e:
-                logger.debug(f"Semantic encoding failed for '{t1}' vs '{t2}': {e}")
+        # Calculate actual token similarity score so 'threshold' is fully utilized
+        common = words1.intersection(words2)
+        smaller_size = min(len(words1), len(words2))
+        similarity_score = len(common) / smaller_size if smaller_size > 0 else 0.0
 
-        return False
+        return similarity_score >= threshold
 
     @classmethod
     def batch_similarity(
             cls,
             query_text: str,
             candidate_texts: List[str],
-            threshold: float = 0.65
+            _threshold: float = 0.65
     ) -> List[Tuple[str, float, bool]]:
-        """Vectorized batch evaluation for maximum matrix-multiplication efficiency."""
+        """Vectorized batch evaluation fallback using token set matching."""
         if not query_text or not candidate_texts:
             return [(c, 0.0, False) for c in candidate_texts]
 
         clean_query = str(query_text).lower().strip()
-        clean_candidates = [str(c).lower().strip() for c in candidate_texts]
+        query_words = set(clean_query.split())
+        results = []
 
-        if not cls.model:
-            query_words = set(clean_query.split())
-            results = []
-            for cand_raw, cand_clean in zip(candidate_texts, clean_candidates):
-                cand_words = set(cand_clean.split())
-                matched = (
-                        clean_query == cand_clean
-                        or query_words.issubset(cand_words)
-                        or cand_words.issubset(query_words)
-                )
-                results.append((cand_raw, 1.0 if matched else 0.0, matched))
-            return results
-
-        try:
-            query_emb = cls._get_cached_embedding(clean_query)
-            candidate_embs = cls.model.encode(
-                clean_candidates,
-                batch_size=64,
-                convert_to_tensor=True,
-                show_progress_bar=False
+        for cand_raw in candidate_texts:
+            cand_clean = str(cand_raw).lower().strip()
+            cand_words = set(cand_clean.split())
+            matched = (
+                    clean_query == cand_clean
+                    or query_words.issubset(cand_words)
+                    or cand_words.issubset(query_words)
+                    or bool(query_words.intersection(cand_words))
             )
-
-            scores = util.cos_sim(query_emb, candidate_embs)[0].tolist()
-
-            results = []
-            for cand_raw, score in zip(candidate_texts, scores):
-                float_score = float(score)
-                results.append((cand_raw, float_score, float_score >= threshold))
-            return results
-
-        except Exception as e:
-            logger.error(f"Batch semantic matching failed: {e}")
-            return [(c, 0.0, False) for c in candidate_texts]
+            results.append((cand_raw, 1.0 if matched else 0.0, matched))
+        return results
 
 
 # =====================================================================

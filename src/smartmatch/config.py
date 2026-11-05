@@ -76,7 +76,7 @@ class Settings(BaseSettings):
     DEBUG_MODE: bool = Field(False)
     SERVER_HOST: str = Field("0.0.0.0")
     SERVER_WORKERS: int = Field(1, ge=1, le=2)
-    SERVER_PORT: int = Field(7860, description="Hugging Face Spaces requires port 7860")
+    SERVER_PORT: int = Field(10000, description="Hugging Face Spaces requires port 7860")
     WORKER_POOL_SIZE: int = Field(2, ge=1, le=5)
     PRODUCTION_API_URL: str = Field(
         ...,

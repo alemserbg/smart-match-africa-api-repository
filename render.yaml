@@ -1,0 +1,73 @@
+version: "1"
+
+services:
+  # ==========================================
+  # 1. UNIFIED FASTAPI & TELETHON GATEWAY (main.py)
+  # ==========================================
+  - type: web
+    name: smart-match-africa-gateway
+    runtime: python
+    region: frankfurt
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    # Uvicorn entry point aligned with the 'src.' directory package layout
+    startCommand: "uvicorn src.smartmatch.main:app --host 0.0.0.0 --port $PORT"
+
+    # Render assigns PORT dynamically; uvicorn binds to it automatically
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: DEBUG_MODE
+        value: "false"
+      - key: SERVER_PORT
+        value: "10000" # Standard default, overridden by Render's runtime PORT
+      - key: BASE_URL
+        value: "https://guzoplus.onrender.com"
+
+      # Telegram & AI Credentials
+      - key: TELEGRAM_TOKEN
+        sync: false
+      - key: TELEGRAM_WEBHOOK_SECRET
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+
+      # Database & Caching
+      - key: DATABASE_URL
+        sync: false
+      - key: REDIS_URL
+        sync: false
+
+      # Supabase Backend
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+
+      # AWS / Backblaze B2 Storage
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
+      - key: AWS_REGION
+        sync: false
+      - key: S3_BUCKET_NAME
+        sync: false
+      - key: B2_ENDPOINT_URL
+        sync: false
+
+      # Payment Webhooks
+      - key: CHAPA_WEBHOOK_SECRET
+        sync: false
+
+      # Telethon Userbot Credentials (Combined into the single web service)
+      - key: API_ID
+        sync: false
+      - key: API_HASH
+        sync: false
+      - key: TELETHON_SESSION_STRING
+        sync: false
+      - key: TRACKER_PHONE_NUMBER
+        sync: false
