@@ -2335,15 +2335,15 @@ class DealsHandler(QueueFlushManagerMixin):
                 }
             ]
 
-            # Persist actual seeker cargo weight and currency in deals table
+            # Persist actual seeker cargo weight, currency, and mapped request_id in deals table
             deal_id = await self.db.create_pending_deal(
                 seeker_id=seeker_id,
                 provider_id=provider_id,
                 listing_id=listing_id,
-                seeker_request_id=req_id,
+                request_id=req_id,  # ✅ Fixed: mapped to 'request_id' to match database schema
                 vertical_type=safe_vertical,
                 current_price=safe_initial_offer,
-                currency=currency,  # ✅ FIXED: Explicitly save the currency
+                currency=currency,  # ✅ Explicitly save currency
                 deal_state="negotiating",
                 negotiation_history=history,
                 asset_title=clean_asset_title,

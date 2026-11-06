@@ -1419,12 +1419,13 @@ class DatabaseManager:
             negotiation_history: list = None,
             asset_title: str = None,
             weight: float = 0.0,
+            request_id: Optional[str] = None,  # ✅ Explicitly accept request_id parameter
             **kwargs
     ) -> Optional[str]:
         """
         Initializes a new deal record or retrieves an active deal session.
         Hardened against positional argument failures, self-offer inversions,
-        and concurrent race conditions.
+        schema mismatches (request_id), and concurrent race conditions.
         """
         if not self.supabase:
             logger.error("❌ Supabase client unavailable in DatabaseManager.")
@@ -1437,7 +1438,14 @@ class DatabaseManager:
 
         history = negotiation_history if negotiation_history is not None else []
 
-        # 2. Pre-check: Verify if an active negotiating deal already exists for this listing & seeker
+        # 2. Resolve request_id, handling alternative or legacy keyword arguments gracefully
+        resolved_request_id = (
+                request_id
+                or kwargs.pop("seeker_request_id", None)
+                or kwargs.pop("request_id", None)
+        )
+
+        # 3. Pre-check: Verify if an active negotiating deal already exists for this listing & seeker
         try:
             existing = (
                 await self.supabase.table('deals')
@@ -1461,7 +1469,7 @@ class DatabaseManager:
         except Exception as precheck_err:
             logger.debug(f"Pre-check deal lookup skipped or failed: {precheck_err}")
 
-        # 3. Dynamic Payload Construction (Prevents Positional / Schema Failures)
+        # 4. Dynamic Payload Construction (Aligned with database schema: uses 'request_id')
         deal_id = str(uuid.uuid4())
         payload = {
             "id": deal_id,
@@ -1471,19 +1479,22 @@ class DatabaseManager:
             "vertical_type": vertical_type,
             "current_price": float(current_price),
             "deal_state": deal_state,
+            "status": "negotiating",
             "negotiation_history": history,
             "asset_title": asset_title,
-            "weight": float(weight)
+            "weight": float(weight),
+            "request_id": resolved_request_id  # ✅ Correct schema column mapped here
         }
 
-        # Integrate any extra keyword args passed dynamically
+        # Integrate any extra keyword args passed dynamically (excluding filtered legacy keys)
         for k, v in kwargs.items():
-            if k not in payload:
+            if k not in payload and k != "seeker_request_id":
                 payload[k] = v
 
         try:
             await self.supabase.table('deals').insert(payload).execute()
-            logger.info(f"🎯 Successfully created deal {deal_id} for Seeker {seeker_id} <-> Provider {provider_id}")
+            logger.info(
+                f"🎯 Successfully created deal {deal_id} for Seeker {seeker_id} <-> Provider {provider_id} (Request ID: {resolved_request_id})")
             return deal_id
         except Exception as e:
             # Fallback for concurrent race condition handling (unique constraint violation)
