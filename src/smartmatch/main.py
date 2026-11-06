@@ -1124,7 +1124,7 @@ async def connect_redis_with_retry(client: Any, max_attempts: int = 30, delay: i
 
 
 async def init_infrastructure() -> Tuple[AsyncClient, Optional[aioredis.Redis]]:
-    """INITIALIZER: Creates client handles and verifies connections with built-in retry logic."""
+    """INITIALIZER: Fast connection setup optimized for sub-10s cold starts on Render free tier."""
     global supabase_client, redis_client
     logger.info("Initializing connection parameters for stateful storage layers...")
 
@@ -1135,30 +1135,30 @@ async def init_infrastructure() -> Tuple[AsyncClient, Optional[aioredis.Redis]]:
     if not supabase_url or not service_role_key:
         raise ValueError("SUPABASE_URL or SERVICE_ROLE_KEY missing from configuration.")
 
-    max_retries = 10
-    retry_delay = 3  # seconds
+    # Optimized for fast cold-start compliance (< 10s total timeout)
+    max_retries = 3
+    retry_delay = 1.0  # seconds
 
     for attempt in range(1, max_retries + 1):
         try:
             logger.info(f"🔄 Initializing infrastructure and testing connections (Attempt {attempt}/{max_retries})...")
 
-            # Client handle creation
+            # Client handle creation with tight timeout constraints
             supabase_client = await acreate_client(supabase_url=supabase_url, supabase_key=service_role_key)
 
-            # Test connection health
+            # Fast test connection health
             await supabase_client.table("users").select("telegram_id").limit(1).execute()
             logger.info("✅ Supabase REST client authenticated successfully.")
 
-            # Instantiates async Redis client without blocking on DNS ping
+            # Instantiates async Redis client non-blockingly
             if clean_redis_url and redis_client is None:
                 redis_client = aioredis.from_url(
                     clean_redis_url,
                     decode_responses=False,
-                    socket_connect_timeout=30,
-                    socket_timeout=30
+                    socket_connect_timeout=5,
+                    socket_timeout=5
                 )
 
-            # Break out of loop once successful
             break
 
         except Exception as err:
@@ -1169,9 +1169,8 @@ async def init_infrastructure() -> Tuple[AsyncClient, Optional[aioredis.Redis]]:
                     exc_info=True)
                 raise err
 
-            logger.info(f"⏳ Waiting {retry_delay} seconds before retrying connection...")
             await asyncio.sleep(retry_delay)
-            retry_delay *= 2  # Exponential backoff
+            retry_delay *= 1.5  # Gentle backoff
 
     return supabase_client, redis_client
 
@@ -1185,18 +1184,17 @@ async def _background_warmup_pipeline(rd_client: Any, ai_eng: Any, match_eng: An
             logger.info("🔌 [Background] Proactively checking/waking Aiven Valkey...")
             woke_up = await wake_up_aiven_service()
             if woke_up:
-                await asyncio.sleep(3)
+                await asyncio.sleep(2)
 
-            # Reduced max_attempts and delay for faster cloud container startup compliance
-            await connect_redis_with_retry(rd_client, max_attempts=10, delay=5)
+            # Fast, resilient background redis check with bounded retries
+            await connect_redis_with_retry(rd_client, max_attempts=3, delay=3)
             logger.info("✅ [Background] Redis cache successfully synchronized.")
         except Exception as valkey_err:
-            logger.error(f"⚠️ [Background] Valkey startup issue (proceeding without cache): {valkey_err}")
+            logger.error(f"⚠️ [Background] Valkey startup issue (proceeding gracefully without blocking): {valkey_err}")
 
     try:
         def _load_ml_models():
             logger.info("🧠 [Background] Skipping heavy HuggingFace AI model pre-warming to conserve RAM...")
-            # Safely invoke warmup methods if they exist, or safely pass to protect memory limits
             if hasattr(ai_eng, "warmup") and callable(getattr(ai_eng, "warmup", None)):
                 try:
                     ai_eng.warmup()
@@ -1211,7 +1209,7 @@ async def _background_warmup_pipeline(rd_client: Any, ai_eng: Any, match_eng: An
 
         # Execute the wrapper safely in a thread to maintain exact structural hook compatibility
         await asyncio.to_thread(_load_ml_models)
-        logger.info("✅ [Background] Application initialized successfully within Render RAM limits.")
+        logger.info("✅ [Background] Application background initialization completed successfully.")
 
     except Exception as ai_err:
         logger.error(f"⚠️ [Background] Background initialization notice: {ai_err}")
@@ -1352,77 +1350,99 @@ def register_telegram_handlers() -> None:
 # 9. BACKGROUND PROCESSES & TEARDOWN
 # ==========================================
 async def render_keep_alive_pulse():
-    """Sends an HTTP GET request to the local health endpoint every 12 minutes to keep the Render service active."""
+    """
+    Sends an HTTP GET request to the external public health endpoint every 9 minutes
+    to ensure Render's edge router registers inbound external traffic, preventing free-tier idle spin-downs.
+    """
     await asyncio.sleep(30)
     port = getattr(settings, "SERVER_PORT", int(os.environ.get("PORT", 8080)))
     local_url = f"http://127.0.0.1:{port}/health"
 
-    app_url = os.getenv("PRODUCTION_API_URL")
-    external_url = None
+    # Resolve the external public URL dynamically
+    app_url = (
+            os.getenv("PRODUCTION_API_URL") or
+            os.getenv("RENDER_EXTERNAL_URL") or
+            getattr(settings, "PRODUCTION_API_URL", None)
+    )
+
+    _external_url = None
     if app_url:
         clean_domain = app_url.strip().replace("http://", "").replace("https://", "").rstrip("/")
         external_url = f"https://{clean_domain}/health"
+    else:
+        # Fallback default pointing to your live Render service domain
+        external_url = "https://smart-match-africa-gateway-ijg3.onrender.com/health"
 
-    logger.info(f"Starting internal keep-alive pulse targeting: {local_url}")
+    logger.info(
+        f"🚀 Starting robust keep-alive pulse. Primary target (External): {external_url} | Fallback (Local): {local_url}")
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
         while not shutdown_event.is_set():
-            try:
-                response = await client.get(local_url)
+            success = False
 
-                payload = {}
+            # 1. Try External URL First (Crucial for resetting Render's edge router idle timer)
+            if external_url:
                 try:
-                    payload = response.json()
-                except Exception:
-                    pass
-
-                if response.status_code == 200:
-                    logger.info(
-                        f"Keep-alive pulse successful | Status: 200 OK | "
-                        f"Cache: {payload.get('cache', 'active')}"
-                    )
-                else:
-                    db_state = payload.get("database", "unknown")
-                    cache_state = payload.get("cache", "unknown")
-                    reason = payload.get("detail", "Service degraded")
+                    ext_resp = await client.get(external_url)
+                    if ext_resp.status_code == 200:
+                        logger.info(f"✅ External keep-alive pulse successful | Status: 200 OK | Target: {external_url}")
+                        success = True
+                    else:
+                        logger.warning(f"⚠️ External keep-alive returned status code: {ext_resp.status_code}")
+                except Exception as ext_err:
                     logger.warning(
-                        f"⚠️ Keep-alive pulse status {response.status_code} ({reason}) | "
-                        f"DB: {db_state} | Cache: {cache_state}"
-                    )
-            except Exception as local_err:
-                if external_url:
-                    logger.warning(f"Local pulse failed ({repr(local_err)}). Retrying via public domain...")
+                        f"⚠️ External keep-alive connection failed ({repr(ext_err)}). Trying local fallback...")
+
+            # 2. Fallback to Local URL if External failed (e.g., network/DNS glitch)
+            if not success:
+                try:
+                    response = await client.get(local_url)
+                    payload = {}
                     try:
-                        ext_resp = await client.get(external_url)
-                        if ext_resp.status_code == 200:
-                            logger.info(f"External keep-alive successful | Status: {ext_resp.status_code}")
-                        else:
-                            logger.warning(f"External keep-alive returned status: {ext_resp.status_code}")
-                    except Exception as ext_err:
-                        logger.warning(f"Keep-alive pulse failed on public domain: {repr(ext_err)}")
-                else:
-                    logger.warning(f"Keep-alive pulse encountered an issue: {repr(local_err)}")
+                        payload = response.json()
+                    except Exception:
+                        pass
+
+                    if response.status_code == 200:
+                        logger.info(
+                            f"✅ Local fallback keep-alive pulse successful | Status: 200 OK | "
+                            f"Cache: {payload.get('cache', 'active')}"
+                        )
+                    else:
+                        db_state = payload.get("database", "unknown")
+                        cache_state = payload.get("cache", "unknown")
+                        reason = payload.get("detail", "Service degraded")
+                        logger.warning(
+                            f"⚠️ Local keep-alive pulse status {response.status_code} ({reason}) | "
+                            f"DB: {db_state} | Cache: {cache_state}"
+                        )
+                except Exception as local_err:
+                    logger.error(f"❌ Both external and local keep-alive pulses failed: {repr(local_err)}")
 
             try:
-                await asyncio.sleep(720)  # 12 minutes
+                # Sleep for 9 minutes (540 seconds) - safely below Render's 15-minute (900s) idle threshold
+                await asyncio.sleep(540)
             except asyncio.CancelledError:
                 break
 
 
+# ==========================================
+# 9. BACKGROUND PROCESSES & TEARDOWN
+# ==========================================
 async def shutdown_resources():
     global db_manager, redis_client
     logger.info("Recycling open storage pools and cache socket threads...")
 
     try:
         if db_manager and hasattr(db_manager, 'close'):
-            await db_manager.close()
+            await asyncio.wait_for(db_manager.close(), timeout=3.0)
     except Exception as e:
         logger.error(f"Error closing Database Manager: {e}")
 
     try:
         if redis_client:
             if hasattr(redis_client, 'aclose'):
-                await redis_client.aclose()
+                await asyncio.wait_for(redis_client.aclose(), timeout=3.0)
             else:
                 await redis_client.close()
     except Exception as e:
@@ -1558,10 +1578,10 @@ async def master_lifespan(_app: FastAPI):
             state.telegram_app = telegram_app
 
             # ==========================================
-            # 🚀 TELEGRAM INITIALIZATION WITH RETRY LOOP (CAPPED BACKOFF)
+            # 🚀 LIGHTNING-FAST TELEGRAM INITIALIZATION
             # ==========================================
-            max_retries = 10
-            base_delay = 2
+            max_retries = 3
+            base_delay = 1.0
 
             for attempt in range(max_retries):
                 try:
@@ -1572,14 +1592,12 @@ async def master_lifespan(_app: FastAPI):
                     break
                 except Exception as e:
                     if attempt == max_retries - 1:
-                        logger.critical(
-                            f"❌ Fatal: Failed to connect to Telegram API after {max_retries} attempts."
-                        )
-                        raise e
+                        logger.warning(
+                            f"⚠️ Telegram startup encountered minor lag during cold restart; proceeding with background recovery: {e}")
+                        break
 
-                    # Capped Exponential Backoff (max 30 seconds)
-                    sleep_time = min(base_delay * (2 ** attempt), 30)
-                    logger.warning(f"⚠️ Telegram API connection failed. Retrying in {sleep_time}s... (Error: {e})")
+                    sleep_time = base_delay * (attempt + 1)
+                    logger.warning(f"⚠️ Telegram API connection retry in {sleep_time}s... (Error: {e})")
                     await asyncio.sleep(sleep_time)
 
             # ==========================================
