@@ -202,7 +202,7 @@ async def terms_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             "• *ለፈላጊው/ገዢው:* `አገልግሎቱን ለማስጀመር ከአቅራቢው ጋር በቀጥታ ይገናኙ። ስማርት ማች አፍሪካን ስለተጠቀሙ እናመሰግናለን!`\n"
             "• *ለአቅራቢው/ሻጩ:* `ጥሪውን በቅርቡ ይጠብቁ፣ ወይም ለመጀመር በቀጥታ ያግኟቸው። Smart Match Africa ስለተጠቀሙ እናመሰግናለን!`\n"
             "ቀሪው የክፍያ እና የማድረስ ስራ በአካል ይከናወናል።\n\n"
-            "🌐 *ሙሉውን መመሪያ እዚህ ያንብቡ:* https://guzoplus.onrender.com/terms"
+            "🌐 *ሙሉውን መመሪያ እዚህ ያንብቡ:* https://smart-match-africa-gateway-ijg3.onrender.com"
         )
     elif 'om' in lang or 'or' in lang:
         terms_text = (
@@ -227,7 +227,7 @@ async def terms_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             "• *Dhiyeessaaf:* `Bilbila isaanii dhiyootti eegaa, ykn jalqabuuf kallattiidhaan isaan quunnamaa. "
             "Smart Match Africa fayyadamuu keessaniif galatoomaa!`\n"
             "Kaffaltii fi dhiyeessiin dhumaa qaamaan raawwatama.\n\n"
-            "🌐 *Imaammata guutuu dubbisuuf:* https://guzoplus.onrender.com/terms"
+            "🌐 *Imaammata guutuu dubbisuuf:* https://smart-match-africa-gateway-ijg3.onrender.com"
         )
     else:
         terms_text = (
@@ -251,7 +251,7 @@ async def terms_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             "• *For Provider:* `\"Expect their call shortly, or contact them directly to get started. Thank you for "
             "using Smart Match Africa!\"`\n"
             "All final asset or service payments are completed securely in person between the parties.\n\n"
-            "🌐 *Read the full policy here:* https://guzoplus.onrender.com/terms"
+            "🌐 *Read the full policy here:* https://smart-match-africa-gateway-ijg3.onrender.com"
         )
 
     if update.message:
@@ -1765,7 +1765,7 @@ app.add_middleware(
         "https://smartmatchafrica.com",
         "https://www.smartmatchafrica.com",
         "https://dashboard.smartmatchafrica.com",
-        "https://guzoplus.onrender.com",
+        "https://smart-match-africa-gateway-ijg3.onrender.com",
     ],
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],

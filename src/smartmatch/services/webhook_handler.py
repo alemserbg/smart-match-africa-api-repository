@@ -3886,7 +3886,7 @@ class WebhookHandler(DispatchService):
             base_url: str = (
                     os.environ.get("BASE_URL") or
                     os.environ.get("RENDER_EXTERNAL_URL") or
-                    "https://guzoplus.onrender.com"
+                    "https://smart-match-africa-gateway-ijg3.onrender.com"
             )
     ) -> str:
         headers = {
@@ -3969,7 +3969,7 @@ class WebhookHandler(DispatchService):
             base_url: str = (
                     os.environ.get("BASE_URL") or
                     os.environ.get("RENDER_EXTERNAL_URL") or
-                    "https://guzoplus.onrender.com"
+                    "https://smart-match-africa-gateway-ijg3.onrender.com"
             )
     ) -> str:
         """
