@@ -1590,17 +1590,30 @@ async def master_lifespan(_app: FastAPI):
         await queue_manager.start_currency_worker(db_client=supabase_client, interval_seconds=currency_interval)
 
         # ==========================================
-        # 📍 START TELETHON LOCATION TRACKING WORKER
+        # 📍 START TELETHON LOCATION TRACKING WORKER (NON-BLOCKING)
         # ==========================================
-        location_worker_task = asyncio.create_task(run_location_worker())
+        async def safe_start_location_worker():
+            try:
+                await run_location_worker()
+            except Exception as loc_err:
+                logger.error(f"⚠️ Location tracking worker encountered an unhandled exception: {loc_err}",
+                             exc_info=True)
+
+        location_worker_task = asyncio.create_task(safe_start_location_worker())
         background_tasks.add(location_worker_task)
         location_worker_task.add_done_callback(background_tasks.discard)
-        logger.info("📍 Telethon location tracking background daemon initiated successfully.")
+        logger.info("📍 Telethon location tracking background daemon initiated successfully (non-blocking).")
 
         # ==========================================
         # 🔄 STARTUP RECOVERY: RESUME PENDING DISPATCHES
         # ==========================================
-        recovery_task = asyncio.create_task(recover_undelivered_dispatches(webhook_handler))
+        async def safe_recovery():
+            try:
+                await recover_undelivered_dispatches(webhook_handler)
+            except Exception as rec_err:
+                logger.error(f"⚠️ Startup recovery task failed: {rec_err}", exc_info=True)
+
+        recovery_task = asyncio.create_task(safe_recovery())
         background_tasks.add(recovery_task)
         recovery_task.add_done_callback(background_tasks.discard)
 
@@ -1635,28 +1648,41 @@ async def master_lifespan(_app: FastAPI):
                     await asyncio.sleep(sleep_time)
 
             # ==========================================
-            # 📅 START SCHEDULED DAILY MENU REPOST WORKER
+            # 📅 START SCHEDULED DAILY MENU REPOST WORKER (NON-BLOCKING)
             # ==========================================
             if queue_manager and supabase_client:
-                await queue_manager.start_daily_menu_repost_worker(
-                    telegram_app=telegram_app,
-                    db_client=supabase_client,
-                    target_hour_eat=3  # 3:00 AM EAT dispatch
-                )
+                async def safe_start_repost_worker():
+                    try:
+                        await queue_manager.start_daily_menu_repost_worker(
+                            telegram_app=telegram_app,
+                            db_client=supabase_client,
+                            target_hour_eat=3  # 3:00 AM EAT dispatch
+                        )
+                    except Exception as repost_err:
+                        logger.error(f"⚠️ Daily menu repost worker failed to start: {repost_err}", exc_info=True)
+
+                repost_task = asyncio.create_task(safe_start_repost_worker())
+                background_tasks.add(repost_task)
+                repost_task.add_done_callback(background_tasks.discard)
 
         # ==========================================
-        # NON-BLOCKING URL / WEBHOOK RESOLUTION
+        # 🌐 ROBUST NON-BLOCKING URL & WEBHOOK RESOLUTION
         # ==========================================
         active_ngrok_url = await asyncio.to_thread(_fetch_active_ngrok_url_sync)
 
-        # Render's native URL takes absolute priority in production
+        # Enforce Render's live ijg3 production URL with fallback safety
         raw_app_url = (
                 os.environ.get("RENDER_EXTERNAL_URL") or
                 os.environ.get("BASE_URL") or
                 os.getenv("WEBHOOK_URL") or
                 os.getenv("PRODUCTION_API_URL") or
-                active_ngrok_url
+                active_ngrok_url or
+                "https://smart-match-africa-gateway-ijg3.onrender.com"
         )
+
+        # Automatically sanitize old service names to prevent 502 Bad Gateway binding errors
+        if raw_app_url and "smart-match-africa-gateway.onrender.com" in raw_app_url and "ijg3" not in raw_app_url:
+            raw_app_url = "https://smart-match-africa-gateway-ijg3.onrender.com"
 
         placeholders = ("your-active-ngrok-subdomain", "example.com", "placeholder")
         is_valid_url = raw_app_url and not any(p in raw_app_url for p in placeholders)
@@ -1671,17 +1697,36 @@ async def master_lifespan(_app: FastAPI):
             else:
                 webhook_endpoint = f"{raw_url.rstrip('/')}/webhooks/telegram"
 
+            # Force exact active ijg3 webhook endpoint compliance
+            if "smart-match-africa-gateway" in webhook_endpoint and "ijg3" not in webhook_endpoint:
+                webhook_endpoint = "https://smart-match-africa-gateway-ijg3.onrender.com/webhooks/telegram"
+
             logger.info(f"Setting Telegram webhook to: {webhook_endpoint}")
             bot_instance: ExtBot = getattr(telegram_app, "bot")
-            await bot_instance.set_webhook(
-                url=webhook_endpoint,
-                drop_pending_updates=True,
-                secret_token=getattr(settings, 'TELEGRAM_WEBHOOK_SECRET', None) or os.getenv("TELEGRAM_WEBHOOK_SECRET"),
-                allowed_updates=Update.ALL_TYPES
-            )
-            logger.info("✅ Telegram webhook configured successfully.")
+
+            # Robust webhook registration with retry handling
+            webhook_success = False
+            for wh_attempt in range(1, 4):
+                try:
+                    await bot_instance.set_webhook(
+                        url=webhook_endpoint,
+                        drop_pending_updates=True,
+                        secret_token=getattr(settings, 'TELEGRAM_WEBHOOK_SECRET', None) or os.getenv(
+                            "TELEGRAM_WEBHOOK_SECRET"),
+                        allowed_updates=Update.ALL_TYPES
+                    )
+                    logger.info(f"✅ Telegram webhook configured successfully on attempt {wh_attempt}.")
+                    webhook_success = True
+                    break
+                except Exception as wh_err:
+                    logger.warning(f"⚠️ Webhook registration attempt {wh_attempt} failed: {wh_err}")
+                    await asyncio.sleep(2.0 * wh_attempt)
+
+            if not webhook_success:
+                logger.error("❌ CRITICAL: Failed to register Telegram webhook after 3 attempts.")
         else:
-            logger.warning("⚠️ No valid production URL or active ngrok tunnel detected. Falling back to polling mode...")
+            logger.warning(
+                "⚠️ No valid production URL or active ngrok tunnel detected. Falling back to polling mode...")
             updater_val = getattr(telegram_app, "updater", None)
             if updater_val:
                 await updater_val.start_polling(drop_pending_updates=True)
