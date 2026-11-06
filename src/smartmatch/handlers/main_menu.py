@@ -493,7 +493,7 @@ class MainMenuHandler:
         if not update.message or not update.message.text:
             return
 
-        text = update.message.text.strip()
+        raw_text = update.message.text.strip()
         user_id = update.effective_user.id if update.effective_user else "Unknown"
 
         if context.user_data is None:
@@ -501,6 +501,13 @@ class MainMenuHandler:
 
         user_data = context.user_data
         lang = user_data.get("lang", "en")
+
+        # 1. Clean and normalize Unicode variation selectors (\ufe0f, \ufe0e) and whitespace
+        clean_text = "".join(c for c in raw_text if ord(c) not in (0xFE0F, 0xFE0E)).strip()
+        norm_text_lower = clean_text.lower()
+
+        logger.info(
+            f"📥 MainMenuHandler routing click for User {user_id} ({lang}): '{raw_text}' [Clean: '{clean_text}']")
 
         target_routes = {
             "btn_list_house": self.housing_h.start_list_house,
@@ -513,13 +520,30 @@ class MainMenuHandler:
             "btn_find_equipment": self.equipment_h.start_find_equipment
         }
 
+        # 2. Robust Multi-Tier Action Matching
         matched_action_key = None
         for key in target_routes.keys():
-            all_labels = get_keyboard_labels(key)
-            if text == get_text(lang, key) or text in all_labels:
+            current_lang_label = get_text(lang, key) or ""
+            all_labels = get_keyboard_labels(key) or []
+
+            # Clean labels for normalized comparison
+            clean_labels = [
+                "".join(c for c in lbl if ord(c) not in (0xFE0F, 0xFE0E)).strip()
+                for lbl in ([current_lang_label] + all_labels) if lbl
+            ]
+
+            # Direct equality or case-insensitive match
+            if clean_text in clean_labels or any(norm_text_lower == lbl.lower() for lbl in clean_labels):
                 matched_action_key = key
                 break
 
+            # Substring fallback for customized emoji representations
+            if any(lbl.lower() in norm_text_lower or norm_text_lower in lbl.lower() for lbl in clean_labels if
+                   len(lbl) > 4):
+                matched_action_key = key
+                break
+
+        # 3. Route Execution
         if matched_action_key:
             logger.info(f"🚦 Menu router verified action token: '{matched_action_key}' for User: {user_id} ({lang})")
 
@@ -529,30 +553,38 @@ class MainMenuHandler:
                 user_data.pop(k, None)
 
             handler_function = target_routes[matched_action_key]
-            return await handler_function(update, context)
+            try:
+                return await handler_function(update, context)
+            except Exception as handler_err:
+                logger.error(
+                    f"❌ Error executing route handler '{matched_action_key}' for User {user_id}: {handler_err}",
+                    exc_info=True)
+                await update.message.reply_text("⚠️ Unable to launch selected section. Please try again or tap /start.")
+                return
 
+        # 4. Active Handoff Evaluation (Protect active conversations & forms)
         is_negotiating = bool(
             user_data.get("active_negotiation_id")
-            and user_data.get("active_negotiation_id") != "None"
-            and (user_data.get("awaiting_counter_input") or user_data.get("intent_to_counter"))
+            and str(user_data.get("active_negotiation_id")).lower() != "none"
+            and (user_data.get("awaiting_counter_input") or user_data.get("intent_to_counter") or user_data.get(
+                "awaiting_counter_offer"))
         )
 
         active_state = user_data.get("current_state")
-
         is_filling_form = bool(
             active_state is not None or
             user_data.get("is_processing_job") is True
         )
 
-        is_numeric_input = text.replace('.', '', 1).isdigit()
+        is_numeric_input = clean_text.replace('.', '', 1).isdigit()
 
         if is_negotiating or is_filling_form or is_numeric_input:
-            logger.debug(f"Handoff pass-through: Input payload '{text}' left untouched for active step processing.")
+            logger.debug(f"Handoff pass-through: Input payload '{raw_text}' left untouched for active step processing.")
             return
 
+        # 5. Unrecognized Input Fallback
         logger.warning(
-            f"Unrecognized root interaction target: '{text}' from User {user_id}. Executing zero-command fallback "
-            f"layout presentation."
+            f"Unrecognized root interaction target: '{raw_text}' from User {user_id}. Presenting main menu fallback."
         )
         await self.show_main_menu(update, context)
 

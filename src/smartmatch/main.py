@@ -460,33 +460,62 @@ def is_user_in_active_flow(user_data: dict) -> bool:
 
 async def global_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Intercepts free text outside of conversational contexts.
-    Corrected order: Respects active conversation flows first, handles explicit
-    negotiation states, intelligent stray numeric inputs with reply-to matching and state caching, and main menu routing.
+    Smart & Robust global text router: Intercepts all free-text and menu interactions,
+    guaranteeing zero silent drops with comprehensive fallback tracing.
     """
     if not update.message or not update.message.text:
         return
 
     user_data = context.user_data or {}
     user_text = update.message.text.strip()
+    user_id = update.effective_user.id if update.effective_user else "Unknown"
 
-    # 1. CONVERSATION & ACTIVE FLOW BYPASS (Must run first so active states like ENTERING_OFFER receive input)
+    logger.info(f"📥 Global text router ingested message from User {user_id}: '{user_text}'")
+
+    # 1. COMMAND & PERSISTENT MENU BUTTON INTERCEPT (Highest Priority)
+    # Check if text matches any persistent menu button across EN, AM, OM or is a start command
+    text_lower = user_text.lower()
+    if text_lower in ("/start", "/menu", "start", "menu") or user_text.startswith("/"):
+        context.user_data.clear()
+        if main_menu:
+            logger.info(f"🚀 Triggering start/menu workflow via global router for User {user_id}")
+            await main_menu.start_command(update, context)
+            return
+
+    # Check multilingual menu options dynamically
+    menu_button_texts = set()
+    for lang_code in ("en", "am", "om"):
+        try:
+            keyboard = MainMenuHandler.get_persistent_keyboard(lang_code)
+            for row in keyboard.keyboard:
+                for btn in row:
+                    menu_button_texts.add(btn.text.strip().lower())
+        except Exception:
+            pass
+
+    if text_lower in menu_button_texts:
+        logger.info(f"🎛️ Persistent menu button match detected ('{user_text}'). Routing to MainMenuHandler.")
+        if main_menu:
+            await main_menu.route_menu_click(update, context)
+            return
+
+    # 2. CONVERSATION & ACTIVE FLOW BYPASS
     if is_user_in_active_flow(user_data):
+        logger.debug(f"⚡ Bypassing global router: User {user_id} is in an active conversational flow.")
         return
 
-    # 2. ACTIVE NEGOTIATION INTERCEPT (Explicit counter-offer mode outside ConversationHandler)
+    # 3. ACTIVE NEGOTIATION INTERCEPT
     if user_data.get("active_negotiation_id") and user_data.get("awaiting_counter_offer"):
         if deals_handler:
+            logger.info(f"🤝 Routing message to deals handler counter-offer flow for User {user_id}")
             await deals_handler.process_counter_message(update, context)
         return
 
-    # 3. INTELLIGENT STRAY NUMERIC & REPLY-TO FALLBACK
+    # 4. INTELLIGENT STRAY NUMERIC & REPLY-TO FALLBACK
     clean_num = user_text.upper().replace(",", "").replace("ETB", "").replace("BIRR", "").strip()
     if clean_num.isdigit() or (clean_num.replace('.', '', 1).isdigit() and clean_num.count('.') < 2):
-        user_id = update.effective_user.id
         target_deal_id = None
 
-        # Safeguard A: Reply-To Context Matching (Check if user replied directly to a negotiation card message)
         if update.message.reply_to_message:
             replied_msg_id = update.message.reply_to_message.message_id
             msg_deal_map = user_data.get("msg_deal_map", {})
@@ -495,25 +524,21 @@ async def global_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE)
             elif deals_handler and hasattr(deals_handler, 'get_deal_by_message_id'):
                 target_deal_id = await deals_handler.get_deal_by_message_id(replied_msg_id)
 
-        # Safeguard B: State Persistence Check (Instant cache lookup in user_data)
         if not target_deal_id:
             target_deal_id = user_data.get("active_negotiation_id")
 
-        # Safeguard C: Fallback to Database Query if cache and reply-to context are empty
         if not target_deal_id and db_manager:
             active_deal = await db_manager.get_user_latest_active_negotiation(user_id)
             if active_deal:
                 target_deal_id = active_deal.get("id")
 
         if target_deal_id:
-            # Seamlessly bind the state and route directly to the deals handler
             context.user_data["active_negotiation_id"] = target_deal_id
             context.user_data["awaiting_counter_offer"] = True
             if deals_handler:
                 await deals_handler.process_counter_message(update, context)
             return
         else:
-            # Fallback only if no active deal exists anywhere in session, reply history, or DB
             msg = (
                 "⚠️ **Action Required**\n\n"
                 "It looks like you are trying to submit a price, but no active negotiation was found.\n"
@@ -522,9 +547,17 @@ async def global_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await update.message.reply_text(msg, parse_mode="Markdown")
             return
 
-    # 4. FALLBACK ROUTING
+    # 5. SAFE FALLBACK ROUTING TO MAIN MENU
     if main_menu:
-        await main_menu.route_menu_click(update, context)
+        logger.info(f"🔀 Fallback routing text input for User {user_id} to MainMenuHandler: '{user_text}'")
+        try:
+            await main_menu.route_menu_click(update, context)
+        except Exception as route_err:
+            logger.error(f"❌ Error in route_menu_click for text '{user_text}': {route_err}", exc_info=True)
+            await update.message.reply_text("⚠️ An error occurred processing your request. Please tap /start to reset.")
+    else:
+        logger.warning(f"⚠️ MainMenuHandler instance is None. Dropped text: '{user_text}'")
+        await update.message.reply_text("⚠️ System menu is reloading. Please try /start.")
 
 
 # ==========================================
