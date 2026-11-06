@@ -2,7 +2,7 @@ version: "1"
 
 services:
   # ==========================================
-  # 1. UNIFIED FASTAPI & TELETHON GATEWAY (main.py)
+  # UNIFIED FASTAPI & TELETHON GATEWAY (main.py)
   # ==========================================
   - type: web
     name: smart-match-africa-gateway
@@ -10,22 +10,18 @@ services:
     region: frankfurt
     plan: free
     buildCommand: "pip install -r requirements.txt"
-    # Uvicorn entry point aligned with the 'src.' directory package layout
     startCommand: "uvicorn src.smartmatch.main:app --host 0.0.0.0 --port $PORT"
-
-envVars:
+    envVars:
       - key: PYTHON_VERSION
-        value: 3.11.0
+        value: "3.11.0"
       - key: DEBUG_MODE
         value: "false"
       - key: SERVER_PORT
         value: "10000"
-      - key: BASE_URL
-        value: "https://smart-match-africa-gateway-ijg3.onrender.com"
       - key: PRODUCTION_API_URL
         value: "https://smart-match-africa-gateway-ijg3.onrender.com"
 
-      # Telegram & AI Credentials
+      # Core Telegram & AI Credentials (Required by config.py)
       - key: TELEGRAM_TOKEN
         sync: false
       - key: TELEGRAM_WEBHOOK_SECRET
@@ -33,37 +29,37 @@ envVars:
       - key: GEMINI_API_KEY
         sync: false
 
-      # Database & Caching
-      - key: DATABASE_URL
+      # Chapa Payment Integration (Required by config.py)
+      - key: CHAPA_SECRET_KEY
         sync: false
-      - key: REDIS_URL
+      - key: CHAPA_WEBHOOK_SECRET
         sync: false
 
-      # Supabase Backend
+      # Supabase Cloud Infrastructure (Required by config.py)
       - key: SUPABASE_URL
         sync: false
-      - key: SUPABASE_KEY
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SERVICE_ROLE_KEY
         sync: false
       - key: SUPABASE_SERVICE_KEY
         sync: false
 
-      # AWS / Backblaze B2 Storage
-      - key: AWS_ACCESS_KEY_ID
+      # Database & Backblaze B2 Storage (Required by config.py)
+      - key: DATABASE_URL
         sync: false
-      - key: AWS_SECRET_ACCESS_KEY
+      - key: REDIS_URL
         sync: false
-      - key: AWS_REGION
+      - key: B2_KEY_ID
+        sync: false
+      - key: B2_APPLICATION_KEY
         sync: false
       - key: S3_BUCKET_NAME
         sync: false
       - key: B2_ENDPOINT_URL
         sync: false
 
-      # Payment Webhooks
-      - key: CHAPA_WEBHOOK_SECRET
-        sync: false
-
-      # Telethon Userbot Credentials (Combined into the single web service)
+      # Telethon Userbot Credentials (Optional)
       - key: API_ID
         sync: false
       - key: API_HASH
@@ -71,4 +67,4 @@ envVars:
       - key: TELETHON_SESSION_STRING
         sync: false
       - key: TRACKER_PHONE_NUMBER
-        sync: false
+        value: "+251922707554"
