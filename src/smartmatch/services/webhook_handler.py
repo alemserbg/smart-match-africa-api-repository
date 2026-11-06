@@ -3257,7 +3257,7 @@ class DispatchService:
 
             if any_success or (not s_chat_id and not p_chat_id):
                 try:
-                    # 1. Fetch current deal record using the correct schema column (`request_id`)
+                    # 1. Fetch current deal record for synchronization
                     current_deal_record = {}
                     try:
                         deal_fetch_res = await supabase_client.table("deals").select(
@@ -3268,54 +3268,7 @@ class DispatchService:
                     except Exception as fetch_deal_err:
                         logger.debug(f"Could not pre-fetch deal IDs for status synchronization: {fetch_deal_err}")
 
-                    resolved_listing_id = (
-                            listing_id
-                            or current_deal_record.get("listing_id")
-                            or deal.get("listing_id")
-                    )
-                    # 💡 Aligned with schema: Uses 'request_id' as the column name in deals table
-                    resolved_request_id = (
-                            locals().get("seeker_request_id")
-                            or current_deal_record.get("request_id")
-                            or deal.get("request_id")
-                            or deal.get("seeker_request_id")
-                    )
-
-                    v_type = current_deal_record.get("vertical_type") or deal.get("vertical_type")
-
-                    # 🛡️ SMART FALLBACK 1: If seeker request ID is missing, lookup seeker's active request by seeker_id & vertical
-                    if not resolved_request_id:
-                        s_id = current_deal_record.get("seeker_id") or deal.get("seeker_id")
-                        if s_id:
-                            try:
-                                req_q = supabase_client.table("seeker_requests").select("id").eq("seeker_id", s_id)
-                                if v_type:
-                                    req_q = req_q.eq("vertical_type", v_type)
-                                req_res = await req_q.in_("status", ["active", "pending", "negotiating"]).order(
-                                    "created_at", desc=True).limit(1).execute()
-                                if req_res and req_res.data and len(req_res.data) > 0:
-                                    resolved_request_id = req_res.data[0].get("id")
-                                    logger.info(f"💡 Smart resolved missing seeker request ID: {resolved_request_id}")
-                            except Exception as req_fb_err:
-                                logger.debug(f"Smart fallback seeker request resolution failed: {req_fb_err}")
-
-                    # 🛡️ SMART FALLBACK 2: If listing ID is missing, lookup provider's active listing by provider_id & vertical
-                    if not resolved_listing_id:
-                        p_id = current_deal_record.get("provider_id") or deal.get("provider_id")
-                        if p_id:
-                            try:
-                                list_q = supabase_client.table("provider_listings").select("id").eq("provider_id", p_id)
-                                if v_type:
-                                    list_q = list_q.eq("vertical_type", v_type)
-                                list_res = await list_q.in_("status", ["active", "reserved", "negotiating"]).order(
-                                    "created_at", desc=True).limit(1).execute()
-                                if list_res and list_res.data and len(list_res.data) > 0:
-                                    resolved_listing_id = list_res.data[0].get("id")
-                                    logger.info(f"💡 Smart resolved missing listing ID: {resolved_listing_id}")
-                            except Exception as list_fb_err:
-                                logger.debug(f"Smart fallback provider listing resolution failed: {list_fb_err}")
-
-                    # 2. Update Deals Table Status to finalized
+                    # 2. Update Deals Table Status to finalized & record payment reference
                     update_payload = {
                         "dispatch_sent": True,
                         "deal_state": "finalized",
@@ -3327,39 +3280,12 @@ class DispatchService:
 
                     await supabase_client.table("deals").update(update_payload).eq("id", deal_id).execute()
 
-                    # 3. Robustly Update Provider Listings Table Status to finalized/rented
-                    if resolved_listing_id:
-                        try:
-                            tx_type_str = str(
-                                locals().get("clean_tx_s", "") or current_deal_record.get("transaction_type",
-                                                                                          "") or deal.get(
-                                    "transaction_type", "")).lower()
-                            listing_status_val = "rented" if "rent" in tx_type_str else "finalized"
-
-                            await supabase_client.table("provider_listings").update({
-                                "status": listing_status_val,
-                                "availability_status": "reserved",
-                                "updated_at": datetime.now(timezone.utc).isoformat()
-                            }).eq("id", resolved_listing_id).execute()
-
-                            logger.info(
-                                f"✅ Provider listing {resolved_listing_id} status updated to '{listing_status_val}'.")
-                        except Exception as list_upd_err:
-                            logger.warning(
-                                f"Failed to update listing status for listing {resolved_listing_id}: {list_upd_err}")
-
-                    # 4. Robustly Update Seeker Requests Table Status to finalized
-                    if resolved_request_id:
-                        try:
-                            await supabase_client.table("seeker_requests").update({
-                                "status": "finalized",
-                                "updated_at": datetime.now(timezone.utc).isoformat()
-                            }).eq("id", resolved_request_id).execute()
-
-                            logger.info(f"✅ Seeker request {resolved_request_id} status updated to 'finalized'.")
-                        except Exception as req_upd_err:
-                            logger.warning(
-                                f"Failed to update seeker request status for request {resolved_request_id}: {req_upd_err}")
+                    # 3. 🎯 Seamlessly Sync Provider Listings & Seeker Requests via Centralized Helper
+                    if hasattr(self, "_sync_listing_status_for_deal"):
+                        await self._sync_listing_status_for_deal(deal_id=deal_id, deal_record=current_deal_record)
+                    else:
+                        logger.warning(
+                            f"⚠️ `_sync_listing_status_for_deal` method not found on handler instance for deal {deal_id}.")
 
                     logger.info(
                         f"🎯 Payment processing & multi-table finalization completed successfully for Deal {deal_id}.")

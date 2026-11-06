@@ -1413,80 +1413,100 @@ class DatabaseManager:
             seeker_id: int,
             provider_id: int,
             listing_id: str,
-            vertical_type: str,
-            current_price: float,
-            deal_state: str,
-            negotiation_history: list,
+            vertical_type: str = "general",
+            current_price: float = 0.0,
+            deal_state: str = "pending_negotiation",
+            negotiation_history: list = None,
             asset_title: str = None,
             weight: float = 0.0,
-            **_kwargs
+            **kwargs
     ) -> Optional[str]:
         """
-        Initializes a new deal record or retrieves the existing active deal ID
-        if a negotiation is already underway for this listing. Optimized with a
-        pre-check to prevent unique constraint 409 Conflict warnings.
+        Initializes a new deal record or retrieves an active deal session.
+        Hardened against positional argument failures, self-offer inversions,
+        and concurrent race conditions.
         """
         if not self.supabase:
+            logger.error("❌ Supabase client unavailable in DatabaseManager.")
+            return None
+
+        # 1. Identity Safety Guard: Prevent self-negotiation state corruptions
+        if str(seeker_id) == str(provider_id):
+            logger.error(f"🚨 Aborted deal creation: Seeker and Provider IDs are identical ({seeker_id}).")
             return None
 
         history = negotiation_history if negotiation_history is not None else []
 
-        # 1. Pre-check: Verify if an active negotiating deal already exists for this listing
+        # 2. Pre-check: Verify if an active negotiating deal already exists for this listing & seeker
         try:
-            existing = await self.supabase.table('deals').select('id').eq('listing_id', listing_id).eq(
-                'deal_state', 'negotiating').execute()
+            existing = (
+                await self.supabase.table('deals')
+                .select('id, seeker_id, provider_id')
+                .eq('listing_id', listing_id)
+                .eq('deal_state', 'negotiating')
+                .execute()
+            )
             if existing and existing.data:
                 data = existing.data
-                if isinstance(data, list) and len(data) > 0:
-                    deal_id = data[0]['id']
-                    logger.info(
-                        f"Active deal {deal_id} already exists for listing {listing_id}. Reusing existing session.")
-                    return deal_id
-                elif isinstance(data, dict) and data.get('id'):
-                    deal_id = data.get('id')
-                    logger.info(
-                        f"Active deal {deal_id} already exists for listing {listing_id}. Reusing existing session.")
-                    return deal_id
+                records = data if isinstance(data, list) else [data]
+                for record in records:
+                    if isinstance(record, dict):  # <--- Fixes PyCharm warning for record.get()
+                        # Ensure the existing active session belongs to this distinct seeker/provider pair
+                        if str(record.get('seeker_id')) == str(seeker_id) and str(record.get('provider_id')) == str(
+                                provider_id):
+                            deal_id = record.get('id')
+                            logger.info(
+                                f"✅ Reusing active deal {deal_id} for Seeker {seeker_id} on Listing {listing_id}.")
+                            return deal_id
         except Exception as precheck_err:
             logger.debug(f"Pre-check deal lookup skipped or failed: {precheck_err}")
 
-        # 2. Proceed with new record generation if no active deal exists
+        # 3. Dynamic Payload Construction (Prevents Positional / Schema Failures)
         deal_id = str(uuid.uuid4())
         payload = {
-            "id": deal_id,  # Explicitly pass the generated UUID so it matches Supabase
-            "seeker_id": seeker_id,
-            "provider_id": provider_id,
+            "id": deal_id,
+            "seeker_id": int(seeker_id),
+            "provider_id": int(provider_id),
             "listing_id": listing_id,
             "vertical_type": vertical_type,
-            "current_price": current_price,
+            "current_price": float(current_price),
             "deal_state": deal_state,
             "negotiation_history": history,
             "asset_title": asset_title,
-            "weight": weight
+            "weight": float(weight)
         }
+
+        # Integrate any extra keyword args passed dynamically
+        for k, v in kwargs.items():
+            if k not in payload:
+                payload[k] = v
 
         try:
             await self.supabase.table('deals').insert(payload).execute()
+            logger.info(f"🎯 Successfully created deal {deal_id} for Seeker {seeker_id} <-> Provider {provider_id}")
             return deal_id
         except Exception as e:
-            # Fallback exception handler for concurrent race conditions (unique constraint violation)
+            # Fallback for concurrent race condition handling (unique constraint violation)
             if "unique_active_asset_deal" in str(e) or "23505" in str(e):
-                logger.warning(
-                    f"Concurrent deal insertion conflict for listing {listing_id}. Retrieving existing active deal ID.")
+                logger.warning(f"⚠️ Concurrent insertion conflict on listing {listing_id}. Retrieving existing deal...")
                 try:
-                    existing = await self.supabase.table('deals').select('id').eq('listing_id', listing_id).eq(
-                        'deal_state', 'negotiating').execute()
+                    existing = (
+                        await self.supabase.table('deals')
+                        .select('id')
+                        .eq('listing_id', listing_id)
+                        .eq('seeker_id', seeker_id)
+                        .execute()
+                    )
                     if existing and existing.data:
                         data = existing.data
-                        if isinstance(data, list) and len(data) > 0:
-                            return data[0]['id']
+                        if isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict):
+                            return data[0].get('id')  # <--- Fixes PyCharm warning for data.get()
                         elif isinstance(data, dict):
                             return data.get('id')
                 except Exception as lookup_err:
-                    logger.error(f"Failed to retrieve existing active deal ID during fallback: {lookup_err}")
+                    logger.error(f"Failed fallback lookup during insertion conflict: {lookup_err}")
                 return None
 
-            # Log unexpected errors normally
             logger.error(f"Database insertion failed for new deal pipeline: {e}")
             raise
 
@@ -1533,10 +1553,8 @@ class DatabaseManager:
 
     async def _sync_listing_status_for_deal(self, deal_id: str, deal_record: dict = None) -> None:
         """
-        Robust helper method to sync both provider_listings and seeker_requests status when a deal is finalized.
-        - Fixed assets (housing, vehicle, equipment) -> provider_listing status updated to 'finalized' & availability to 'reserved'.
-        - Dynamic services (freight, ride) -> provider_listing status remains 'active'.
-        - Seeker requests -> status updated to 'finalized' in all cases upon deal finalization using robust fallback resolution.
+        Robust synchronization helper ensuring both provider_listings and seeker_requests
+        are updated to 'finalized' upon deal completion.
         """
         try:
             now_iso = datetime.now(timezone.utc).isoformat()
@@ -1550,11 +1568,10 @@ class DatabaseManager:
                     logger.warning(f"⚠️ Could not fetch deal record for ID {deal_id} during status synchronization.")
                     return
 
-            # 💡 Schema-aligned column keys ('listing_id', 'request_id', 'seeker_id', 'vertical_type')
             listing_id = deal_record.get('listing_id')
             request_id = deal_record.get('request_id')
             seeker_id = deal_record.get('seeker_id')
-            vertical = str(deal_record.get('vertical_type') or deal_record.get('vertical') or '').lower().strip()
+            vertical = str(deal_record.get('vertical_type') or '').lower().strip()
 
             # 2. Sync Provider Listing Status
             if listing_id:
@@ -1576,9 +1593,10 @@ class DatabaseManager:
                 else:
                     logger.info(f"ℹ️ Dynamic service listing {listing_id} retained as 'active'.")
 
-            # 3. Robust Smart Fallback: If request_id is missing, resolve it via seeker_id & vertical_type
+            # 3. Multi-Tier Smart Fallback for Seeker Request Resolution
             if not request_id and seeker_id:
                 try:
+                    # Tier A: Try finding any unfinalized request for this seeker and vertical
                     query = self.supabase.table('seeker_requests').select('id, status') \
                         .eq('seeker_id', seeker_id)
 
@@ -1588,6 +1606,7 @@ class DatabaseManager:
                     req_res = await query.order('created_at', desc=True).limit(5).execute()
 
                     if req_res and req_res.data:
+                        # Filter for active/pending/negotiating first
                         active_reqs = [r for r in req_res.data if
                                        r.get('status') in ['active', 'pending', 'negotiating']]
                         target_req = active_reqs[0] if active_reqs else req_res.data[0]
@@ -1596,12 +1615,28 @@ class DatabaseManager:
                         logger.info(
                             f"💡 Smart resolved seeker request ID {request_id} for deal {deal_id} (vertical: {vertical})")
 
+                        # Back-populate the deal record for future reference
                         await self.supabase.table('deals').update({'request_id': request_id}).eq('id',
                                                                                                  deal_id).execute()
                 except Exception as fb_err:
                     logger.warning(f"Smart fallback seeker request lookup failed for deal {deal_id}: {fb_err}")
 
-            # 4. Sync Seeker Request Status to 'finalized' with verification
+            # Tier B Absolute Fallback: If still missing, query the absolute latest request by seeker_id
+            if not request_id and seeker_id:
+                try:
+                    last_res = await self.supabase.table('seeker_requests').select('id') \
+                        .eq('seeker_id', seeker_id) \
+                        .order('created_at', desc=True) \
+                        .limit(1) \
+                        .execute()
+                    if last_res and last_res.data:
+                        request_id = last_res.data[0].get('id')
+                        logger.info(
+                            f"💡 Absolute fallback resolved seeker request ID {request_id} for seeker {seeker_id}")
+                except Exception as abs_err:
+                    logger.error(f"Absolute fallback failed: {abs_err}")
+
+            # 4. Sync Seeker Request Status to 'finalized' with Guaranteed Execution
             if request_id:
                 update_res = await self.supabase.table('seeker_requests').update({
                     'status': 'finalized',
@@ -1612,10 +1647,10 @@ class DatabaseManager:
                     logger.info(f"✅ Seeker request {request_id} status successfully updated to 'finalized'.")
                 else:
                     logger.warning(
-                        f"⚠️ Seeker request {request_id} update executed, but no matching record was modified.")
+                        f"⚠️ Seeker request {request_id} update executed, but no matching record returned data.")
             else:
                 logger.error(
-                    f"❌ CRITICAL: Could not resolve any seeker request for deal {deal_id} (Seeker ID: {seeker_id}, Vertical: {vertical}). Seeker request remains unupdated.")
+                    f"❌ CRITICAL: Could not resolve any seeker request for deal {deal_id} (Seeker ID: {seeker_id}).")
 
         except Exception as sync_err:
             logger.error(f"Failed to sync provider listing & seeker request status for deal '{deal_id}': {sync_err}",

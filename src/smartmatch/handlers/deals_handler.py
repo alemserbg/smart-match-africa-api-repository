@@ -1706,6 +1706,7 @@ class DealsHandler(QueueFlushManagerMixin):
             listing_id: str,
             vertical_type: Optional[str] = None,
             initial_offer: float = 0.0,
+            request_id: Optional[str] = None,  # <--- Request ID accepted here
             asset_title: Optional[str] = None,
             transaction_type: Optional[str] = None,
             is_reverse: bool = False,
@@ -1738,13 +1739,35 @@ class DealsHandler(QueueFlushManagerMixin):
                     if deal_lookup and deal_lookup.data and deal_lookup.data.get("listing_id"):
                         resolved_listing_id = deal_lookup.data.get("listing_id")
                         logger.info(
-                            f"🛡️ Guard successfully resolved actual listing_id {resolved_listing_id} from passed Deal ID {listing_id}")
+                            f"🛡️ Guard successfully resolved actual listing_id {resolved_listing_id} from passed Deal ID {listing_id}"
+                        )
                     else:
                         logger.error(
-                            f"❌ Foreign Key Error: ID '{resolved_listing_id}' is neither a valid listing nor an existing deal.")
+                            f"❌ Foreign Key Error: ID '{resolved_listing_id}' is neither a valid listing nor an existing deal."
+                        )
                         return None
             except Exception as guard_err:
                 logger.warning(f"Listing ID validation guard warning: {guard_err}")
+
+        # 💡 SMART REQUEST ID RESOLUTION: Auto-resolve seeker request if not explicitly provided
+        if not request_id and supabase_client:
+            try:
+                resolved_vertical = vertical_type or _kwargs.get('vertical') or 'general'
+                req_res = (
+                    await supabase_client.table('seeker_requests')
+                    .select('id')
+                    .eq('seeker_id', seeker_id)
+                    .eq('vertical_type', resolved_vertical)
+                    .order('created_at', desc=True)
+                    .limit(1)
+                    .execute()
+                )
+                if req_res and req_res.data:
+                    request_id = req_res.data[0].get('id')
+                    logger.info(
+                        f"💡 Auto-resolved seeker request ID {request_id} for deal initiation (Seeker: {seeker_id})")
+            except Exception as req_err:
+                logger.debug(f"Could not auto-resolve request_id during initiation: {req_err}")
 
         # ⚡ SMART NOTIFICATION RESOLUTION: Check explicit notify, silent flags, or handlers
         if notify is not None:
@@ -1774,7 +1797,8 @@ class DealsHandler(QueueFlushManagerMixin):
         if not resolved_bot:
             if should_notify:
                 logger.error(
-                    "Telegram bot instance could not be resolved in initiate_negotiation while notifications are enabled.")
+                    "Telegram bot instance could not be resolved in initiate_negotiation while notifications are enabled."
+                )
             else:
                 logger.debug(
                     f"Telegram bot instance not resolved for listing {resolved_listing_id}, "
@@ -1797,7 +1821,8 @@ class DealsHandler(QueueFlushManagerMixin):
 
         if str(seeker_id) == str(provider_id):
             logger.warning(
-                f"Blocked self-offer attempt: User {seeker_id} attempted to offer on own listing {resolved_listing_id}")
+                f"Blocked self-offer attempt: User {seeker_id} attempted to offer on own listing {resolved_listing_id}"
+            )
             lang = str(_kwargs.get('lang') or _kwargs.get('language') or 'en').lower().strip()
             update = _kwargs.get('update')
             if lang in ['om', 'or', 'oromoo']:

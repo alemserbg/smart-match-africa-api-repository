@@ -1183,13 +1183,14 @@ async def init_infrastructure() -> Tuple[AsyncClient, Optional[aioredis.Redis]]:
             await supabase_client.table("users").select("telegram_id").limit(1).execute()
             logger.info("✅ Supabase REST client authenticated successfully.")
 
-            # Instantiates async Redis client non-blockingly
+            # Instantiates async Redis client with hardened health check parameters
             if clean_redis_url and redis_client is None:
                 redis_client = aioredis.from_url(
                     clean_redis_url,
                     decode_responses=False,
-                    socket_connect_timeout=5,
-                    socket_timeout=5
+                    socket_connect_timeout=10,
+                    socket_timeout=10,
+                    health_check_interval=30  # Actively pings and keeps socket alive
                 )
 
             break
