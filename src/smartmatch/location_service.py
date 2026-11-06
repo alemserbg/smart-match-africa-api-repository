@@ -18,6 +18,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger("smartmatch.location_worker")
 
+# Suppress noisy internal Telethon update and network logs
+logging.getLogger('telethon').setLevel(logging.WARNING)
+logging.getLogger('telethon.client.updates').setLevel(logging.WARNING)
+
 # --- CONFIGURATION & CREDENTIALS ---
 API_ID = settings.API_ID
 API_HASH = settings.API_HASH
