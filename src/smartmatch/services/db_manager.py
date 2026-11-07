@@ -1406,7 +1406,7 @@ class DatabaseManager:
             return []
 
     # ==========================================
-    # DEAL MANAGEMENT METHODS
+    # DEAL MANAGEMENT METHODS (DB MANAGER)
     # ==========================================
     async def create_pending_deal(
             self,
@@ -1415,7 +1415,7 @@ class DatabaseManager:
             listing_id: str,
             vertical_type: str = "general",
             current_price: float = 0.0,
-            deal_state: str = "pending_negotiation",
+            _deal_state: str = "negotiating",
             negotiation_history: list = None,
             asset_title: str = None,
             weight: float = 0.0,
@@ -1423,9 +1423,9 @@ class DatabaseManager:
             **kwargs
     ) -> Optional[str]:
         """
-        Initializes a new deal record or retrieves an active deal session.
-        Hardened against positional argument failures, self-offer inversions,
-        schema mismatches (request_id), and concurrent race conditions.
+        Initializes a new deal record or seamlessly resumes an existing active/pending deal session
+        in progress. Hardened against session contamination, vertical/currency switching vulnerabilities,
+        and concurrent race conditions by prioritizing the database as the single source of truth.
         """
         if not self.supabase:
             logger.error("❌ Supabase client unavailable in DatabaseManager.")
@@ -1445,75 +1445,138 @@ class DatabaseManager:
                 or kwargs.pop("request_id", None)
         )
 
-        # 3. Pre-check: Verify if an active negotiating deal already exists for this listing & seeker
-        try:
-            existing = (
-                await self.supabase.table('deals')
-                .select('id, seeker_id, provider_id')
-                .eq('listing_id', listing_id)
-                .eq('deal_state', 'negotiating')
-                .execute()
-            )
-            if existing and existing.data:
-                data = existing.data
-                records = data if isinstance(data, list) else [data]
-                for record in records:
-                    if isinstance(record, dict):  # <--- Fixes PyCharm warning for record.get()
-                        # Ensure the existing active session belongs to this distinct seeker/provider pair
-                        if str(record.get('seeker_id')) == str(seeker_id) and str(record.get('provider_id')) == str(
-                                provider_id):
-                            deal_id = record.get('id')
-                            logger.info(
-                                f"✅ Reusing active deal {deal_id} for Seeker {seeker_id} on Listing {listing_id}.")
-                            return deal_id
-        except Exception as precheck_err:
-            logger.debug(f"Pre-check deal lookup skipped or failed: {precheck_err}")
+        resolved_listing_id = listing_id
+        authoritative_vertical = vertical_type
+        authoritative_currency = kwargs.get("currency", "ETB")
 
-        # 4. Dynamic Payload Construction (Aligned with database schema: uses 'request_id')
+        # 3. SINGLE SOURCE OF TRUTH ENFORCEMENT & CURRENCY/VERTICAL LOCKDOWN
+        try:
+            # Check listing ground truth if listing_id provided
+            if resolved_listing_id:
+                listing_check = await self.supabase.table("provider_listings").select("*").eq("id",
+                                                                                              resolved_listing_id).maybe_single().execute()
+                if listing_check and listing_check.data:
+                    listing_data = listing_check.data
+                    provider_id = int(listing_data.get('provider_id', provider_id))
+                    authoritative_vertical = str(listing_data.get('vertical_type', vertical_type)).lower().strip()
+                    authoritative_currency = str(listing_data.get('currency', authoritative_currency)).upper().strip()
+                    if not asset_title:
+                        asset_title = listing_data.get('vehicle_type') or listing_data.get(
+                            'equipment_type') or listing_data.get('property_use') or listing_data.get('title')
+
+            # Check seeker request ground truth if request_id provided
+            if resolved_request_id:
+                req_check = await self.supabase.table("seeker_requests").select("*").eq("id",
+                                                                                        resolved_request_id).maybe_single().execute()
+                if req_check and req_check.data:
+                    req_data = req_check.data
+                    seeker_id = int(req_data.get('seeker_id', seeker_id))
+                    authoritative_vertical = str(req_data.get('vertical_type', authoritative_vertical)).lower().strip()
+                    authoritative_currency = str(req_data.get('currency', authoritative_currency)).upper().strip()
+                    if not asset_title:
+                        asset_title = req_data.get('property_use') or req_data.get('vehicle_type') or req_data.get(
+                            'equipment_type')
+        except Exception as truth_err:
+            logger.warning(f"Database single source of truth lookup warning in create_pending_deal: {truth_err}")
+
+        # 4. ROBUST RESUMPTION PRE-CHECK: Prevent creating new deal if an active/interrupted one exists
+        try:
+            existing_query = (
+                self.supabase.table('deals')
+                .select('*')
+                .eq('seeker_id', seeker_id)
+                .eq('provider_id', provider_id)
+            )
+            if resolved_listing_id:
+                existing_query = existing_query.eq('listing_id', resolved_listing_id)
+            elif resolved_request_id:
+                existing_query = existing_query.eq('request_id', resolved_request_id)
+
+            existing_res = await existing_query.order('created_at', desc=True).limit(1).maybe_single().execute()
+            if existing_res and existing_res.data:
+                existing_deal = existing_res.data
+                deal_state_val = str(existing_deal.get('deal_state', '')).lower().strip()
+                deal_status_val = str(existing_deal.get('status', '')).lower().strip()
+                payment_status_val = str(existing_deal.get('payment_status', '')).lower().strip()
+
+                # If deal is already finalized or paid, do not resume as negotiating
+                is_locked = (
+                        deal_state_val in ['finalized', 'completed', 'paid', 'locked']
+                        or deal_status_val in ['finalized', 'completed', 'paid', 'locked']
+                        or payment_status_val in ['paid', 'completed']
+                )
+
+                if not is_locked:
+                    deal_id = existing_deal.get('id')
+                    # Resume session: update price/history if new offer provided, otherwise keep existing session intact
+                    update_payload = {
+                        "current_price": float(current_price or existing_deal.get('current_price', 0.0)),
+                        "agreed_price": float(current_price or existing_deal.get('agreed_price', 0.0)),
+                        "vertical_type": authoritative_vertical,
+                        "currency": authoritative_currency,
+                        "updated_at": datetime.utcnow().isoformat()
+                    }
+                    if asset_title:
+                        update_payload["asset_title"] = asset_title
+                    if resolved_request_id:
+                        update_payload["request_id"] = resolved_request_id
+
+                    await self.supabase.table('deals').update(update_payload).eq('id', deal_id).execute()
+                    logger.info(
+                        f"🔄 Resumed interrupted active deal session {deal_id} for Seeker {seeker_id} <-> Provider {provider_id}.")
+                    return deal_id
+        except Exception as resumption_err:
+            logger.debug(f"Resumption pre-check lookup failed or skipped: {resumption_err}")
+
+        # 5. Dynamic Payload Construction (Aligned with database schema tables)
         deal_id = str(uuid.uuid4())
         payload = {
             "id": deal_id,
             "seeker_id": int(seeker_id),
             "provider_id": int(provider_id),
-            "listing_id": listing_id,
-            "vertical_type": vertical_type,
+            "listing_id": resolved_listing_id,
+            "request_id": resolved_request_id,
+            "vertical_type": authoritative_vertical,
             "current_price": float(current_price),
-            "deal_state": deal_state,
-            "status": "negotiating",
+            "agreed_price": float(current_price),
+            "currency": authoritative_currency,
+            "deal_state": "negotiating",
+            "status": "pending",
             "negotiation_history": history,
-            "asset_title": asset_title,
+            "asset_title": asset_title or "Matched Asset Listing",
             "weight": float(weight),
-            "request_id": resolved_request_id  # ✅ Correct schema column mapped here
+            "created_at": datetime.utcnow().isoformat(),
+            "updated_at": datetime.utcnow().isoformat()
         }
 
-        # Integrate any extra keyword args passed dynamically (excluding filtered legacy keys)
+        # Integrate any extra keyword args passed dynamically
         for k, v in kwargs.items():
-            if k not in payload and k != "seeker_request_id":
+            if k not in payload and k not in ["seeker_request_id", "currency"]:
                 payload[k] = v
 
         try:
             await self.supabase.table('deals').insert(payload).execute()
             logger.info(
-                f"🎯 Successfully created deal {deal_id} for Seeker {seeker_id} <-> Provider {provider_id} (Request ID: {resolved_request_id})")
+                f"🎯 Successfully created new deal {deal_id} for Seeker {seeker_id} <-> Provider {provider_id} (Request ID: {resolved_request_id})")
             return deal_id
         except Exception as e:
             # Fallback for concurrent race condition handling (unique constraint violation)
             if "unique_active_asset_deal" in str(e) or "23505" in str(e):
-                logger.warning(f"⚠️ Concurrent insertion conflict on listing {listing_id}. Retrieving existing deal...")
+                logger.warning(
+                    f"⚠️ Concurrent insertion conflict on listing {resolved_listing_id}. Retrieving existing deal...")
                 try:
-                    existing = (
-                        await self.supabase.table('deals')
+                    fallback_query = (
+                        self.supabase.table('deals')
                         .select('id')
-                        .eq('listing_id', listing_id)
                         .eq('seeker_id', seeker_id)
-                        .execute()
+                        .eq('provider_id', provider_id)
                     )
-                    if existing and existing.data:
-                        data = existing.data
-                        if isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict):
-                            return data[0].get('id')  # <--- Fixes PyCharm warning for data.get()
-                        elif isinstance(data, dict):
-                            return data.get('id')
+                    if resolved_listing_id:
+                        fallback_query = fallback_query.eq('listing_id', resolved_listing_id)
+
+                    fallback_res = await fallback_query.order('created_at', desc=True).limit(1).maybe_single().execute()
+                    if fallback_res and fallback_res.data:
+                        return fallback_res.data.get('id')
                 except Exception as lookup_err:
                     logger.error(f"Failed fallback lookup during insertion conflict: {lookup_err}")
                 return None

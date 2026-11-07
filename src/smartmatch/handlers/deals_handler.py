@@ -1714,62 +1714,18 @@ class DealsHandler(QueueFlushManagerMixin):
             notify: Optional[bool] = None,
             **_kwargs: Any
     ) -> Optional[str]:
+        """
+        Coordinates deal initiation across multi-vertical asset domains by strictly prioritizing
+        the database schema as the single source of truth. Handles Forward and Reverse matching
+        modalities and blocks unauthorized vertical_type or currency switching.
+        """
         context = _kwargs.get('context')
         silent = _kwargs.get('silent', False)
         notify_peer = _kwargs.get('notify_peer', True)
         notify_seeker = _kwargs.get('notify_seeker', True)
-        currency = _kwargs.get('currency', 'ETB')
+        currency = str(_kwargs.get('currency', 'ETB')).upper().strip()
 
-        # =========================================================================
-        # 🛡️ PERMANENT GUARD: Prevent Deal IDs from violating provider_listings fkey
-        # =========================================================================
-        db_client = getattr(self, 'db', getattr(self, 'db_manager', None))
-        supabase_client = getattr(db_client, 'supabase', None) if db_client else getattr(self, 'supabase', None)
-
-        resolved_listing_id = listing_id
-        if supabase_client and resolved_listing_id:
-            try:
-                # Check if the ID exists in provider_listings
-                listing_check = await supabase_client.table("provider_listings").select("id").eq("id",
-                                                                                                 resolved_listing_id).maybe_single().execute()
-                if not listing_check or not listing_check.data:
-                    # It's not a listing ID! Check if it's an existing Deal ID
-                    deal_lookup = await supabase_client.table("deals").select("listing_id").eq("id",
-                                                                                               resolved_listing_id).maybe_single().execute()
-                    if deal_lookup and deal_lookup.data and deal_lookup.data.get("listing_id"):
-                        resolved_listing_id = deal_lookup.data.get("listing_id")
-                        logger.info(
-                            f"🛡️ Guard successfully resolved actual listing_id {resolved_listing_id} from passed Deal ID {listing_id}"
-                        )
-                    else:
-                        logger.error(
-                            f"❌ Foreign Key Error: ID '{resolved_listing_id}' is neither a valid listing nor an existing deal."
-                        )
-                        return None
-            except Exception as guard_err:
-                logger.warning(f"Listing ID validation guard warning: {guard_err}")
-
-        # 💡 SMART REQUEST ID RESOLUTION: Auto-resolve seeker request if not explicitly provided
-        if not request_id and supabase_client:
-            try:
-                resolved_vertical = vertical_type or _kwargs.get('vertical') or 'general'
-                req_res = (
-                    await supabase_client.table('seeker_requests')
-                    .select('id')
-                    .eq('seeker_id', seeker_id)
-                    .eq('vertical_type', resolved_vertical)
-                    .order('created_at', desc=True)
-                    .limit(1)
-                    .execute()
-                )
-                if req_res and req_res.data:
-                    request_id = req_res.data[0].get('id')
-                    logger.info(
-                        f"💡 Auto-resolved seeker request ID {request_id} for deal initiation (Seeker: {seeker_id})")
-            except Exception as req_err:
-                logger.debug(f"Could not auto-resolve request_id during initiation: {req_err}")
-
-        # ⚡ SMART NOTIFICATION RESOLUTION: Check explicit notify, silent flags, or handlers
+        # ⚡ SMART NOTIFICATION RESOLUTION (Defines 'should_notify' cleanly)
         if notify is not None:
             should_notify = notify
         elif 'notify' in _kwargs:
@@ -1781,9 +1737,10 @@ class DealsHandler(QueueFlushManagerMixin):
         else:
             should_notify = True
 
-        if context and hasattr(context, 'user_data') and isinstance(context.user_data, dict):
-            self._clear_negotiation_state(context.user_data)
+        db_client = getattr(self, 'db', getattr(self, 'db_manager', None))
+        supabase_client = getattr(db_client, 'supabase', None) if db_client else getattr(self, 'supabase', None)
 
+        # ⚡ RESOLVE BOT INSTANCE EARLY TO PREVENT UNRESOLVED REFERENCE WARNINGS
         resolved_bot = bot or _kwargs.get('bot')
         if not resolved_bot:
             if context and hasattr(context, 'bot') and context.bot:
@@ -1792,18 +1749,6 @@ class DealsHandler(QueueFlushManagerMixin):
                 resolved_bot = self.bot
             elif hasattr(self, 'telegram_app') and self.telegram_app:
                 resolved_bot = getattr(self.telegram_app, 'bot', None)
-
-        # 🛡️ ROBUST LOGGING & BOT AWARENESS: Suppress warnings to DEBUG when notifications are disabled
-        if not resolved_bot:
-            if should_notify:
-                logger.error(
-                    "Telegram bot instance could not be resolved in initiate_negotiation while notifications are enabled."
-                )
-            else:
-                logger.debug(
-                    f"Telegram bot instance not resolved for listing {resolved_listing_id}, "
-                    "but notifications are disabled (notify=False / silent). Skipping safely."
-                )
 
         is_reverse_match = bool(
             is_reverse
@@ -1814,15 +1759,79 @@ class DealsHandler(QueueFlushManagerMixin):
             or str(_kwargs.get('direction', '')).lower() == 'reverse'
         )
 
-        match_label = "Reverse Match" if is_reverse_match else "Forward Match"
-        logger.info(
-            f"Spawning deal negotiation ({match_label}): Seeker {seeker_id} <-> Provider {provider_id} on Listing {resolved_listing_id} (notify={should_notify})"
-        )
+        # =====================================================================
+        # 🔒 DATABASE SINGLE SOURCE OF TRUTH & MATCHING REALITY ENFORCEMENT
+        # =====================================================================
+        resolved_listing_id = listing_id
+        resolved_request_id = request_id
+        authoritative_vertical = None
+        authoritative_currency = None
 
+        if supabase_client:
+            # 1. REVERSE MATCHING REALITY: Provider clicks seeker_id / request_id
+            if is_reverse_match and resolved_request_id:
+                try:
+                    req_res = await supabase_client.table('seeker_requests').select('*').eq('id',
+                                                                                            resolved_request_id).maybe_single().execute()
+                    if req_res and req_res.data:
+                        req_data = req_res.data
+                        seeker_id = int(req_data.get('seeker_id', seeker_id))
+                        authoritative_vertical = str(req_data.get('vertical_type', '')).lower().strip()
+                        authoritative_currency = str(req_data.get('currency', 'ETB')).upper().strip()
+                        if not asset_title:
+                            asset_title = req_data.get('property_use') or req_data.get('vehicle_type') or req_data.get(
+                                'equipment_type')
+                except Exception as req_lookup_err:
+                    logger.warning(f"Failed to fetch authoritative seeker_request for reverse match: {req_lookup_err}")
+
+            # 2. FORWARD MATCHING REALITY: Seeker clicks provider_id / listing_id
+            elif resolved_listing_id:
+                try:
+                    listing_check = await supabase_client.table("provider_listings").select("*").eq("id",
+                                                                                                    resolved_listing_id).maybe_single().execute()
+                    if listing_check and listing_check.data:
+                        listing_data = listing_check.data
+                        provider_id = int(listing_data.get('provider_id', provider_id))
+                        authoritative_vertical = str(listing_data.get('vertical_type', '')).lower().strip()
+                        authoritative_currency = str(listing_data.get('currency', 'ETB')).upper().strip()
+                        if not asset_title:
+                            asset_title = listing_data.get('vehicle_type') or listing_data.get(
+                                'equipment_type') or listing_data.get('property_use') or listing_data.get('title')
+                    else:
+                        # Fallback check if passed ID is an existing Deal ID
+                        deal_lookup = await supabase_client.table("deals").select("*").eq("id",
+                                                                                          resolved_listing_id).maybe_single().execute()
+                        if deal_lookup and deal_lookup.data:
+                            deal_data = deal_lookup.data
+                            resolved_listing_id = deal_data.get('listing_id')
+                            seeker_id = int(deal_data.get('seeker_id', seeker_id))
+                            provider_id = int(deal_data.get('provider_id', provider_id))
+                            authoritative_vertical = str(deal_data.get('vertical_type', '')).lower().strip()
+                            authoritative_currency = str(deal_data.get('currency', 'ETB')).upper().strip()
+                except Exception as guard_err:
+                    logger.warning(f"Database single source of truth guard warning: {guard_err}")
+
+        # =====================================================================
+        # 🛡️ VULNERABILITY PREVENTION: STRICT VERTICAL & CURRENCY LOCKDOWN
+        # =====================================================================
+        if authoritative_vertical:
+            if vertical_type and vertical_type.lower().strip() != authoritative_vertical:
+                logger.warning(
+                    f"⚠️ Blocked illegal vertical_type switch from '{vertical_type}' to authoritative '{authoritative_vertical}'. Enforcing DB single source of truth."
+                )
+            vertical_type = authoritative_vertical
+        else:
+            vertical_type = str(vertical_type or _kwargs.get('domain', 'general')).lower().strip()
+
+        if authoritative_currency:
+            currency = authoritative_currency
+
+        if currency not in ["ETB", "USD", "EUR", "GBP"]:
+            currency = "ETB"
+
+        # Block self-offers
         if str(seeker_id) == str(provider_id):
-            logger.warning(
-                f"Blocked self-offer attempt: User {seeker_id} attempted to offer on own listing {resolved_listing_id}"
-            )
+            logger.warning(f"Blocked self-offer attempt: User {seeker_id} attempted to negotiate on own asset.")
             lang = str(_kwargs.get('lang') or _kwargs.get('language') or 'en').lower().strip()
             update = _kwargs.get('update')
             if lang in ['om', 'or', 'oromoo']:
@@ -1835,57 +1844,105 @@ class DealsHandler(QueueFlushManagerMixin):
                 await update.message.reply_text(self_offer_err)
             return None
 
-        # ✅ FIXED: Define safe_initial_offer early so it is available for all deal status checks & updates
         safe_initial_offer = float(initial_offer or 0.0)
 
         # =====================================================================
-        # 🔒 ROBUST EXISTING DEAL STATUS & PRICE SYNC RESOLUTION
+        # 🔄 EXISTING DEAL RESOLUTION & SESSION CONTAMINATION PREVENTION
         # =====================================================================
         existing_deal = None
         deal_id_str = None
 
-        if supabase_client and resolved_listing_id:
+        if supabase_client and resolved_listing_id and seeker_id and provider_id:
             try:
                 existing_res = await supabase_client.table('deals').select('*').eq('listing_id',
-                                                                                   resolved_listing_id).eq(
-                    'seeker_id', seeker_id).eq('provider_id', provider_id).order('created_at', desc=True).limit(
-                    1).maybe_single().execute()
+                                                                                   resolved_listing_id).eq('seeker_id',
+                                                                                                           seeker_id).eq(
+                    'provider_id', provider_id).order('created_at', desc=True).limit(1).maybe_single().execute()
                 if existing_res and existing_res.data:
                     existing_deal = existing_res.data
             except Exception as lookup_err:
-                logger.warning(f"Could not check existing deal for listing {resolved_listing_id}: {lookup_err}")
+                logger.warning(f"Could not check existing deal: {lookup_err}")
 
-        # If an existing pending/negotiating deal is found, update it; otherwise create a new pending deal
-        if existing_deal and existing_deal.get('deal_state') in ['pending', 'negotiating']:
-            deal_id_str = existing_deal.get('id')
-            try:
-                update_payload = {
-                    "current_price": safe_initial_offer,
-                    "agreed_price": safe_initial_offer,
-                    "updated_at": datetime.utcnow().isoformat()
-                }
-                if currency:
-                    update_payload["currency"] = currency
-                if asset_title:
-                    update_payload["asset_title"] = asset_title
+        if existing_deal:
+            deal_id_str = str(existing_deal.get('id'))
+            deal_state = str(existing_deal.get('deal_state', '')).lower().strip()
+            deal_status = str(existing_deal.get('status', '')).lower().strip()
+            payment_status = str(existing_deal.get('payment_status', '')).lower().strip()
 
-                await supabase_client.table('deals').update(update_payload).eq('id', deal_id_str).execute()
+            # Check if already finalized, paid, or fully locked
+            is_locked = (
+                    deal_state in ['finalized', 'completed', 'paid', 'locked']
+                    or deal_status in ['finalized', 'completed', 'paid', 'locked']
+                    or payment_status in ['paid', 'completed']
+            )
+
+            if is_locked:
                 logger.info(
-                    f"🔄 Active or pending deal {deal_id_str} found for listing {resolved_listing_id}. Updated price to {safe_initial_offer}.")
-                return deal_id_str
-            except Exception as update_err:
-                logger.warning(f"Failed to update existing deal {deal_id_str}: {update_err}")
+                    f"🚫 Deal {deal_id_str} for listing {resolved_listing_id} is already finalized and paid. Locking negotiation."
+                )
+                lang = str(_kwargs.get('lang') or _kwargs.get('language') or 'en').lower().strip()
 
-        # Proceed with safe deal insertion using the verified resolved_listing_id
+                if lang in ['om', 'or']:
+                    locked_msg = "⚠️ Qabeenyi kun kaffaltiidhaan xumurameera ykn cufameera; amma irra deebi'amee mormamuu hin danda'u."
+                elif lang in ['am', 'amharic']:
+                    locked_msg = "⚠️ ይህ ንብረት/ዕቃ አስቀድሞ በክፍያ ተጠናቋል/ተቆልፏል፤ ዳግም መደራደር አይቻልም።"
+                else:
+                    locked_msg = "⚠️ This item under negotiation is already finalized, paid, and locked."
+
+                update_obj = _kwargs.get('update')
+                if update_obj and hasattr(update_obj, 'message') and update_obj.message:
+                    await update_obj.message.reply_text(locked_msg)
+                elif resolved_bot and seeker_id:
+                    try:
+                        await resolved_bot.send_message(chat_id=int(seeker_id), text=locked_msg)
+                    except Exception:
+                        pass
+                return None
+            elif deal_state in ['pending', 'negotiating']:
+                try:
+                    update_payload = {
+                        "current_price": safe_initial_offer,
+                        "agreed_price": safe_initial_offer,
+                        "currency": currency,
+                        "vertical_type": vertical_type,
+                        "updated_at": datetime.utcnow().isoformat()
+                    }
+                    if asset_title:
+                        update_payload["asset_title"] = asset_title
+                    if resolved_request_id:
+                        update_payload["request_id"] = resolved_request_id
+
+                    history = existing_deal.get('negotiation_history', []) or []
+                    if not isinstance(history, list):
+                        history = []
+                    history.append({
+                        'time': datetime.utcnow().isoformat(),
+                        'actor': provider_id if is_reverse_match else seeker_id,
+                        'offer': float(safe_initial_offer),
+                        'action': 'counter_offer',
+                        'currency': currency
+                    })
+                    update_payload["negotiation_history"] = history
+
+                    await supabase_client.table('deals').update(update_payload).eq('id', deal_id_str).execute()
+                    logger.info(
+                        f"🔄 Synchronized and updated active/pending deal {deal_id_str} with price {safe_initial_offer}."
+                    )
+                    return deal_id_str
+                except Exception as update_err:
+                    logger.warning(f"Failed to update existing deal {deal_id_str}: {update_err}")
+
+        # Insert new pending deal aligned strictly with database schema tables
         payload = {
             "seeker_id": seeker_id,
             "provider_id": provider_id,
             "listing_id": resolved_listing_id,
-            "vertical_type": vertical_type or _kwargs.get('domain', 'freight'),
+            "request_id": resolved_request_id,
+            "vertical_type": vertical_type,
             "current_price": safe_initial_offer,
             "agreed_price": safe_initial_offer,
             "currency": currency,
-            "asset_title": asset_title or "Transport Asset",
+            "asset_title": asset_title or "Matched Asset Listing",
             "deal_state": "negotiating",
             "status": "pending",
             "created_at": datetime.utcnow().isoformat(),
