@@ -1419,31 +1419,49 @@ class DatabaseManager:
             negotiation_history: list = None,
             asset_title: str = None,
             weight: float = 0.0,
-            request_id: Optional[str] = None,  # ✅ Explicitly accept request_id parameter
+            request_id: Optional[str] = None,
             **kwargs
     ) -> Optional[str]:
         """
-        Initializes a new deal record or seamlessly resumes an existing active/pending deal session
-        in progress. Hardened against session contamination, vertical/currency switching vulnerabilities,
-        and concurrent race conditions by prioritizing the database as the single source of truth.
+        Initializes a new deal record or resumes an existing active/pending deal session.
+        Hardened against foreign key constraint violations and argument mismatches.
         """
         if not self.supabase:
             logger.error("❌ Supabase client unavailable in DatabaseManager.")
             return None
 
-        # 1. Identity Safety Guard: Prevent self-negotiation state corruptions
         if str(seeker_id) == str(provider_id):
             logger.error(f"🚨 Aborted deal creation: Seeker and Provider IDs are identical ({seeker_id}).")
             return None
 
         history = negotiation_history if negotiation_history is not None else []
 
-        # 2. Resolve request_id, handling alternative or legacy keyword arguments gracefully
         resolved_request_id = (
                 request_id
                 or kwargs.pop("seeker_request_id", None)
                 or kwargs.pop("request_id", None)
         )
+
+        # 🛡️ FOREIGN KEY GUARD: Ensure request_id exists in seeker_requests table
+        if resolved_request_id:
+            try:
+                req_check = await self.supabase.table('seeker_requests').select('id').eq('id',
+                                                                                         resolved_request_id).maybe_single().execute()
+                if not req_check or not req_check.data:
+                    # It's not a seeker request ID! Check if it's a Deal ID
+                    deal_req_lookup = await self.supabase.table('deals').select('request_id').eq('id',
+                                                                                                 resolved_request_id).maybe_single().execute()
+                    if deal_req_lookup and deal_req_lookup.data and deal_req_lookup.data.get('request_id'):
+                        resolved_request_id = deal_req_lookup.data.get('request_id')
+                        logger.info(
+                            f"🛡️ Guard successfully resolved actual seeker request_id {resolved_request_id} from passed Deal ID")
+                    else:
+                        logger.warning(
+                            f"⚠️ ID '{resolved_request_id}' is not a valid seeker_request. Setting request_id to None to prevent FK crash.")
+                        resolved_request_id = None
+            except Exception as fk_guard_err:
+                logger.warning(f"Request ID validation guard warning: {fk_guard_err}")
+                resolved_request_id = None
 
         resolved_listing_id = listing_id
         authoritative_vertical = vertical_type

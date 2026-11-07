@@ -2394,20 +2394,20 @@ class DealsHandler(QueueFlushManagerMixin):
 
             # Persist actual seeker cargo weight, currency, and mapped request_id in deals table
             deal_id = await self.db.create_pending_deal(
-                seeker_id=seeker_id,
-                provider_id=provider_id,  # ✅ Passed explicitly as keyword arg
-                listing_id=resolved_listing_id,
+                seeker_id=int(seeker_id),
+                provider_id=int(provider_id),  # ✅ Explicit keyword argument with type enforcement
+                listing_id=str(resolved_listing_id),
                 # ✅ Uses resolved listing ID (guards against Deal ID vs Listing ID fkey mismatches)
-                request_id=resolved_request_id,  # ✅ Uses resolved request ID
+                request_id=str(resolved_request_id) if resolved_request_id else None,  # ✅ Uses resolved request ID
                 vertical_type=vertical_type,  # ✅ Uses locked single source of truth vertical
-                current_price=safe_initial_offer,
+                current_price=float(safe_initial_offer),
                 currency=currency,  # ✅ Explicitly save currency
                 deal_state="negotiating",
                 negotiation_history=history,
                 asset_title=clean_asset_title,
                 transaction_type=transaction_type,
-                weight=safe_weight_baseline,
-                cargo_weight_kgs=safe_weight_baseline
+                weight=float(safe_weight_baseline),
+                cargo_weight_kgs=float(safe_weight_baseline)
             )
 
             if not deal_id:
