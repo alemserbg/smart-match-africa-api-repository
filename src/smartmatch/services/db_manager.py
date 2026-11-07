@@ -1415,7 +1415,7 @@ class DatabaseManager:
             listing_id: str,
             vertical_type: str = "general",
             current_price: float = 0.0,
-            _deal_state: str = "negotiating",
+            deal_state: str = "negotiating",
             negotiation_history: list = None,
             asset_title: str = None,
             weight: float = 0.0,
@@ -1423,8 +1423,9 @@ class DatabaseManager:
             **kwargs
     ) -> Optional[str]:
         """
-        Initializes a new deal record or resumes an existing active/pending deal session.
-        Hardened against foreign key constraint violations and argument mismatches.
+        Initializes a new deal record or seamlessly resumes an active/pending deal session in progress.
+        Hardened against foreign key constraint violations (deals_request_id_fkey), session contamination,
+        and argument mismatches.
         """
         if not self.supabase:
             logger.error("❌ Supabase client unavailable in DatabaseManager.")
@@ -1436,25 +1437,32 @@ class DatabaseManager:
 
         history = negotiation_history if negotiation_history is not None else []
 
+        # 1. Resolve request_id, handling alternative or legacy keyword arguments gracefully
         resolved_request_id = (
                 request_id
                 or kwargs.pop("seeker_request_id", None)
                 or kwargs.pop("request_id", None)
         )
 
-        # 🛡️ FOREIGN KEY GUARD: Ensure request_id exists in seeker_requests table
+        if resolved_request_id in ("None", "none", ""):
+            resolved_request_id = None
+
+        resolved_listing_id = listing_id if listing_id not in ("None", "none", "") else None
+
+        # 🛡️ FOREIGN KEY GUARD: Ensure request_id actually exists in seeker_requests table
         if resolved_request_id:
             try:
                 req_check = await self.supabase.table('seeker_requests').select('id').eq('id',
                                                                                          resolved_request_id).maybe_single().execute()
                 if not req_check or not req_check.data:
-                    # It's not a seeker request ID! Check if it's a Deal ID
-                    deal_req_lookup = await self.supabase.table('deals').select('request_id').eq('id',
-                                                                                                 resolved_request_id).maybe_single().execute()
-                    if deal_req_lookup and deal_req_lookup.data and deal_req_lookup.data.get('request_id'):
+                    # Check if the passed ID is actually an existing Deal ID
+                    deal_req_lookup = await self.supabase.table('deals').select('request_id, listing_id').eq('id',
+                                                                                                             resolved_request_id).maybe_single().execute()
+                    if deal_req_lookup and deal_req_lookup.data:
                         resolved_request_id = deal_req_lookup.data.get('request_id')
-                        logger.info(
-                            f"🛡️ Guard successfully resolved actual seeker request_id {resolved_request_id} from passed Deal ID")
+                        if not resolved_listing_id and deal_req_lookup.data.get('listing_id'):
+                            resolved_listing_id = deal_req_lookup.data.get('listing_id')
+                        logger.info(f"🛡️ Guard successfully resolved actual seeker request_id from passed Deal ID.")
                     else:
                         logger.warning(
                             f"⚠️ ID '{resolved_request_id}' is not a valid seeker_request. Setting request_id to None to prevent FK crash.")
@@ -1463,13 +1471,11 @@ class DatabaseManager:
                 logger.warning(f"Request ID validation guard warning: {fk_guard_err}")
                 resolved_request_id = None
 
-        resolved_listing_id = listing_id
         authoritative_vertical = vertical_type
         authoritative_currency = kwargs.get("currency", "ETB")
 
-        # 3. SINGLE SOURCE OF TRUTH ENFORCEMENT & CURRENCY/VERTICAL LOCKDOWN
+        # 2. SINGLE SOURCE OF TRUTH ENFORCEMENT & CURRENCY/VERTICAL LOCKDOWN
         try:
-            # Check listing ground truth if listing_id provided
             if resolved_listing_id:
                 listing_check = await self.supabase.table("provider_listings").select("*").eq("id",
                                                                                               resolved_listing_id).maybe_single().execute()
@@ -1482,7 +1488,6 @@ class DatabaseManager:
                         asset_title = listing_data.get('vehicle_type') or listing_data.get(
                             'equipment_type') or listing_data.get('property_use') or listing_data.get('title')
 
-            # Check seeker request ground truth if request_id provided
             if resolved_request_id:
                 req_check = await self.supabase.table("seeker_requests").select("*").eq("id",
                                                                                         resolved_request_id).maybe_single().execute()
@@ -1497,7 +1502,7 @@ class DatabaseManager:
         except Exception as truth_err:
             logger.warning(f"Database single source of truth lookup warning in create_pending_deal: {truth_err}")
 
-        # 4. ROBUST RESUMPTION PRE-CHECK: Prevent creating new deal if an active/interrupted one exists
+        # 3. ROBUST RESUMPTION PRE-CHECK: Prevent creating new deal if an active/interrupted one exists
         try:
             existing_query = (
                 self.supabase.table('deals')
@@ -1526,12 +1531,12 @@ class DatabaseManager:
 
                 if not is_locked:
                     deal_id = existing_deal.get('id')
-                    # Resume session: update price/history if new offer provided, otherwise keep existing session intact
                     update_payload = {
                         "current_price": float(current_price or existing_deal.get('current_price', 0.0)),
                         "agreed_price": float(current_price or existing_deal.get('agreed_price', 0.0)),
                         "vertical_type": authoritative_vertical,
                         "currency": authoritative_currency,
+                        "deal_state": deal_state,
                         "updated_at": datetime.utcnow().isoformat()
                     }
                     if asset_title:
@@ -1546,7 +1551,7 @@ class DatabaseManager:
         except Exception as resumption_err:
             logger.debug(f"Resumption pre-check lookup failed or skipped: {resumption_err}")
 
-        # 5. Dynamic Payload Construction (Aligned with database schema tables)
+        # 4. Dynamic Payload Construction (Aligned with database schema tables)
         deal_id = str(uuid.uuid4())
         payload = {
             "id": deal_id,
@@ -1558,7 +1563,7 @@ class DatabaseManager:
             "current_price": float(current_price),
             "agreed_price": float(current_price),
             "currency": authoritative_currency,
-            "deal_state": "negotiating",
+            "deal_state": deal_state,  # ✅ Fixed: Maps parameter instead of hardcoded string
             "status": "pending",
             "negotiation_history": history,
             "asset_title": asset_title or "Matched Asset Listing",

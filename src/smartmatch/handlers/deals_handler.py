@@ -2396,16 +2396,15 @@ class DealsHandler(QueueFlushManagerMixin):
             deal_id = await self.db.create_pending_deal(
                 seeker_id=int(seeker_id),
                 provider_id=int(provider_id),  # ✅ Explicit keyword argument with type enforcement
-                listing_id=str(resolved_listing_id),
-                # ✅ Uses resolved listing ID (guards against Deal ID vs Listing ID fkey mismatches)
-                request_id=str(resolved_request_id) if resolved_request_id else None,  # ✅ Uses resolved request ID
-                vertical_type=vertical_type,  # ✅ Uses locked single source of truth vertical
+                listing_id=str(resolved_listing_id) if resolved_listing_id not in ("None", "none", "") else None,
+                request_id=str(resolved_request_id) if resolved_request_id not in ("None", "none", "") else None,
+                vertical_type=str(vertical_type or "general"),
                 current_price=float(safe_initial_offer),
-                currency=currency,  # ✅ Explicitly save currency
+                currency=str(currency),
                 deal_state="negotiating",
                 negotiation_history=history,
-                asset_title=clean_asset_title,
-                transaction_type=transaction_type,
+                asset_title=str(clean_asset_title),
+                transaction_type=str(transaction_type) if transaction_type else None,
                 weight=float(safe_weight_baseline),
                 cargo_weight_kgs=float(safe_weight_baseline)
             )
