@@ -2395,10 +2395,11 @@ class DealsHandler(QueueFlushManagerMixin):
             # Persist actual seeker cargo weight, currency, and mapped request_id in deals table
             deal_id = await self.db.create_pending_deal(
                 seeker_id=seeker_id,
-                provider_id=provider_id,
-                listing_id=listing_id,
-                request_id=req_id,  # ✅ Fixed: mapped to 'request_id' to match database schema
-                vertical_type=safe_vertical,
+                provider_id=provider_id,  # ✅ Passed explicitly as keyword arg
+                listing_id=resolved_listing_id,
+                # ✅ Uses resolved listing ID (guards against Deal ID vs Listing ID fkey mismatches)
+                request_id=resolved_request_id,  # ✅ Uses resolved request ID
+                vertical_type=vertical_type,  # ✅ Uses locked single source of truth vertical
                 current_price=safe_initial_offer,
                 currency=currency,  # ✅ Explicitly save currency
                 deal_state="negotiating",
@@ -2410,7 +2411,7 @@ class DealsHandler(QueueFlushManagerMixin):
             )
 
             if not deal_id:
-                logger.error(f"Failed to create pending deal in database for listing {listing_id}")
+                logger.error(f"Failed to create pending deal in database for listing {resolved_listing_id}")
                 return None
 
             deal_id_str = str(deal_id)

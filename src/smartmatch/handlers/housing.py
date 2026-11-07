@@ -3153,17 +3153,19 @@ class HousingHandler:
                     except Exception as db_err:
                         logger.warning(f"Failed to query provider_listings table for listing {listing_id}: {db_err}")
 
-                req_id = context.user_data.get('seeker_request_id') or context.user_data.get('active_housing_deal_id')
-                if req_id and hasattr(database, 'table'):
+                resolved_req_id = req_id or context.user_data.get('seeker_request_id') or context.user_data.get(
+                    'active_housing_deal_id')
+                if resolved_req_id and hasattr(database, 'table'):
                     try:
                         sr_res = await database.table('seeker_requests').select('*').eq('id',
-                                                                                        str(req_id)).maybe_single().execute()
+                                                                                        str(resolved_req_id)).maybe_single().execute()
                         if sr_res and getattr(sr_res, 'data', None):
                             seeker_req_data = sr_res.data
                             if not db_currency and seeker_req_data.get('currency'):
                                 db_currency = seeker_req_data.get('currency')
                     except Exception as req_err:
-                        logger.warning(f"Failed to fetch seeker request details for request {req_id}: {req_err}")
+                        logger.warning(
+                            f"Failed to fetch seeker request details for request {resolved_req_id}: {req_err}")
 
             # Enforce Database Ground-Truth Currency with strict fallback to ETB
             currency = str(
@@ -3182,6 +3184,7 @@ class HousingHandler:
                     seeker_id=int(seeker_id),
                     provider_id=int(provider_id),
                     listing_id=str(listing_id),
+                    request_id=str(resolved_req_id) if resolved_req_id else None,
                     vertical_type="housing",
                     initial_offer=agreed_price,
                     currency=currency,
@@ -3191,6 +3194,12 @@ class HousingHandler:
                 )
 
             if deal_id_str:
+                # 🧹 Clear context user state and counter-offer flags immediately to prevent duplicate echos
+                if context and hasattr(context, 'user_data') and isinstance(context.user_data, dict):
+                    context.user_data.pop("awaiting_counter_offer", None)
+                    context.user_data.pop("active_counter_deal_id", None)
+                    context.user_data.clear()
+
                 formatted_price = f"{agreed_price:,.2f} {currency}"
 
                 prop_use = str(
@@ -3270,7 +3279,6 @@ class HousingHandler:
                     spec_lines["am"].append(f"📐 <b>የተጠየቀው ስፋት (Requested Area):</b> {seeker_sqm} ካሬ ሜትር")
                     spec_lines["om"].append(f"📐 <b>Bal'ina Gaafatame (Requested Area):</b> {seeker_sqm} m²")
 
-                # Helper function to convert numeric values (e.g., 3.0 or "3.0") cleanly to integer strings ("3")
                 def _format_int_beds(bed_val):
                     try:
                         return str(int(float(bed_val)))
@@ -3396,6 +3404,13 @@ class HousingHandler:
                         ]
                         reply_markup = InlineKeyboardMarkup(keyboard)
 
+                        # 🔒 Strict Actor Resolution Routing: Ensure target notification goes to recipient_chat_id (Seeker)
+                        current_actor_id = update.effective_user.id
+                        if str(current_actor_id) == str(provider_id):
+                            recipient_chat_id = int(seeker_id)
+                        else:
+                            recipient_chat_id = int(provider_id)
+
                         photo_ref = None
 
                         def _extract_url_or_id(item):
@@ -3440,7 +3455,7 @@ class HousingHandler:
                         if presigned_url:
                             try:
                                 await context.bot.send_photo(
-                                    chat_id=int(seeker_id),
+                                    chat_id=recipient_chat_id,
                                     photo=presigned_url,
                                     caption=seeker_notify_msg,
                                     parse_mode="HTML",
@@ -3448,18 +3463,20 @@ class HousingHandler:
                                 )
                                 photo_dispatched = True
                             except Exception as photo_err:
-                                logger.warning(f"Failed to dispatch photo card to seeker {seeker_id}: {photo_err}")
+                                logger.warning(
+                                    f"Failed to dispatch photo card to recipient {recipient_chat_id}: {photo_err}")
 
                         if not photo_dispatched:
                             await context.bot.send_message(
-                                chat_id=int(seeker_id),
+                                chat_id=recipient_chat_id,
                                 text=seeker_notify_msg,
                                 parse_mode="HTML",
                                 reply_markup=reply_markup
                             )
                     except Exception as notify_err:
-                        logger.error(f"Failed to notify housing seeker {seeker_id}: {notify_err}")
+                        logger.error(f"Failed to notify recipient {seeker_id}: {notify_err}")
                 else:
+                    # Forward match flow remains untouched and fully preserved
                     tx_disp_seek = tx_type_display.get(tx_type_raw, {"en": f"For {tx_type_raw.capitalize()}",
                                                                      "am": f"ለ{tx_type_raw}",
                                                                      "om": f"{tx_type_raw}f"})
