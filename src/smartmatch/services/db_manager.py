@@ -1413,7 +1413,7 @@ class DatabaseManager:
             seeker_id: int,
             provider_id: int,
             listing_id: str,
-            vertical_type: str = "general",
+            vertical_type: str = "housing",
             current_price: float = 0.0,
             deal_state: str = "negotiating",
             negotiation_history: list = None,
@@ -1444,24 +1444,21 @@ class DatabaseManager:
                 or kwargs.pop("request_id", None)
         )
 
-        if resolved_request_id in ("None", "none", ""):
+        if resolved_request_id in ("None", "none", "", None):
             resolved_request_id = None
-
-        resolved_listing_id = listing_id if listing_id not in ("None", "none", "") else None
-
-        # 🛡️ FOREIGN KEY GUARD: Ensure request_id actually exists in seeker_requests table
-        if resolved_request_id:
+        else:
+            # 🛡️ FOREIGN KEY GUARD: Ensure request_id actually exists in seeker_requests table
             try:
                 req_check = await self.supabase.table('seeker_requests').select('id').eq('id',
-                                                                                         resolved_request_id).maybe_single().execute()
+                                                                                         str(resolved_request_id)).maybe_single().execute()
                 if not req_check or not req_check.data:
                     # Check if the passed ID is actually an existing Deal ID
                     deal_req_lookup = await self.supabase.table('deals').select('request_id, listing_id').eq('id',
-                                                                                                             resolved_request_id).maybe_single().execute()
+                                                                                                             str(resolved_request_id)).maybe_single().execute()
                     if deal_req_lookup and deal_req_lookup.data:
                         resolved_request_id = deal_req_lookup.data.get('request_id')
-                        if not resolved_listing_id and deal_req_lookup.data.get('listing_id'):
-                            resolved_listing_id = deal_req_lookup.data.get('listing_id')
+                        if not listing_id and deal_req_lookup.data.get('listing_id'):
+                            listing_id = deal_req_lookup.data.get('listing_id')
                         logger.info(f"🛡️ Guard successfully resolved actual seeker request_id from passed Deal ID.")
                     else:
                         logger.warning(
@@ -1470,6 +1467,17 @@ class DatabaseManager:
             except Exception as fk_guard_err:
                 logger.warning(f"Request ID validation guard warning: {fk_guard_err}")
                 resolved_request_id = None
+
+        resolved_listing_id = listing_id if listing_id not in ("None", "none", "", None) else None
+
+        # Strict Platform Verticals Validation & Lockdown
+        ALLOWED_VERTICALS = {"housing", "vehicle", "equipment", "freight", "ride"}
+        raw_vertical = str(vertical_type or kwargs.get('domain') or kwargs.get('vertical') or "housing").lower().strip()
+        if raw_vertical not in ALLOWED_VERTICALS:
+            logger.warning(f"⚠️ Invalid or unmapped vertical '{raw_vertical}' detected. Defaulting to 'housing'.")
+            vertical_type = "housing"
+        else:
+            vertical_type = raw_vertical
 
         authoritative_vertical = vertical_type
         authoritative_currency = kwargs.get("currency", "ETB")
@@ -1482,7 +1490,9 @@ class DatabaseManager:
                 if listing_check and listing_check.data:
                     listing_data = listing_check.data
                     provider_id = int(listing_data.get('provider_id', provider_id))
-                    authoritative_vertical = str(listing_data.get('vertical_type', vertical_type)).lower().strip()
+                    auth_v = str(listing_data.get('vertical_type', vertical_type)).lower().strip()
+                    if auth_v in ALLOWED_VERTICALS:
+                        authoritative_vertical = auth_v
                     authoritative_currency = str(listing_data.get('currency', authoritative_currency)).upper().strip()
                     if not asset_title:
                         asset_title = listing_data.get('vehicle_type') or listing_data.get(
@@ -1494,7 +1504,9 @@ class DatabaseManager:
                 if req_check and req_check.data:
                     req_data = req_check.data
                     seeker_id = int(req_data.get('seeker_id', seeker_id))
-                    authoritative_vertical = str(req_data.get('vertical_type', authoritative_vertical)).lower().strip()
+                    auth_v = str(req_data.get('vertical_type', authoritative_vertical)).lower().strip()
+                    if auth_v in ALLOWED_VERTICALS:
+                        authoritative_vertical = auth_v
                     authoritative_currency = str(req_data.get('currency', authoritative_currency)).upper().strip()
                     if not asset_title:
                         asset_title = req_data.get('property_use') or req_data.get('vehicle_type') or req_data.get(
@@ -1522,7 +1534,6 @@ class DatabaseManager:
                 deal_status_val = str(existing_deal.get('status', '')).lower().strip()
                 payment_status_val = str(existing_deal.get('payment_status', '')).lower().strip()
 
-                # If deal is already finalized or paid, do not resume as negotiating
                 is_locked = (
                         deal_state_val in ['finalized', 'completed', 'paid', 'locked']
                         or deal_status_val in ['finalized', 'completed', 'paid', 'locked']
@@ -1563,7 +1574,7 @@ class DatabaseManager:
             "current_price": float(current_price),
             "agreed_price": float(current_price),
             "currency": authoritative_currency,
-            "deal_state": deal_state,  # ✅ Fixed: Maps parameter instead of hardcoded string
+            "deal_state": deal_state,
             "status": "pending",
             "negotiation_history": history,
             "asset_title": asset_title or "Matched Asset Listing",
@@ -1572,9 +1583,8 @@ class DatabaseManager:
             "updated_at": datetime.utcnow().isoformat()
         }
 
-        # Integrate any extra keyword args passed dynamically
         for k, v in kwargs.items():
-            if k not in payload and k not in ["seeker_request_id", "currency"]:
+            if k not in payload and k not in ["seeker_request_id", "currency", "domain", "vertical"]:
                 payload[k] = v
 
         try:
@@ -1583,20 +1593,13 @@ class DatabaseManager:
                 f"🎯 Successfully created new deal {deal_id} for Seeker {seeker_id} <-> Provider {provider_id} (Request ID: {resolved_request_id})")
             return deal_id
         except Exception as e:
-            # Fallback for concurrent race condition handling (unique constraint violation)
             if "unique_active_asset_deal" in str(e) or "23505" in str(e):
-                logger.warning(
-                    f"⚠️ Concurrent insertion conflict on listing {resolved_listing_id}. Retrieving existing deal...")
+                logger.warning(f"⚠️ Concurrent insertion conflict. Retrieving existing deal...")
                 try:
-                    fallback_query = (
-                        self.supabase.table('deals')
-                        .select('id')
-                        .eq('seeker_id', seeker_id)
-                        .eq('provider_id', provider_id)
-                    )
+                    fallback_query = self.supabase.table('deals').select('id').eq('seeker_id', seeker_id).eq(
+                        'provider_id', provider_id)
                     if resolved_listing_id:
                         fallback_query = fallback_query.eq('listing_id', resolved_listing_id)
-
                     fallback_res = await fallback_query.order('created_at', desc=True).limit(1).maybe_single().execute()
                     if fallback_res and fallback_res.data:
                         return fallback_res.data.get('id')

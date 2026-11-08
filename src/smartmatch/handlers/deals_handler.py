@@ -1720,6 +1720,40 @@ class DealsHandler(QueueFlushManagerMixin):
         modalities and blocks unauthorized vertical_type or currency switching.
         """
         context = _kwargs.get('context')
+
+        # 🧹 STALE SESSION CLEANUP: Prevent cross-vertical contamination
+        if context and hasattr(context, 'user_data') and isinstance(context.user_data, dict):
+            active_deal_id = context.user_data.get('active_negotiation_id')
+            # If switching deals, clear old session keys
+            if active_deal_id and str(active_deal_id) != str(listing_id):
+                context.user_data.pop('active_negotiation_id', None)
+                context.user_data.pop('seeker_request_id', None)
+
+        db_client = getattr(self, 'db', getattr(self, 'db_manager', None))
+        supabase_client = getattr(db_client, 'supabase', None) if db_client else getattr(self, 'supabase', None)
+
+        resolved_listing_id = listing_id
+        resolved_request_id = request_id
+
+        # 🛡️ DEAL ID vs LISTING/REQUEST ID GUARD (Prevents foreign key crashes)
+        if supabase_client:
+            try:
+                # Check if listing_id is actually an existing Deal ID
+                deal_check = await supabase_client.table("deals").select(
+                    "id, listing_id, request_id, vertical_type").eq("id",
+                                                                    str(resolved_listing_id)).maybe_single().execute()
+                if deal_check and deal_check.data:
+                    d_data = deal_check.data
+                    resolved_listing_id = d_data.get('listing_id')
+                    if not resolved_request_id:
+                        resolved_request_id = d_data.get('request_id')
+                    if not vertical_type:
+                        vertical_type = d_data.get('vertical_type')
+                    logger.info(f"🛡️ Guard resolved actual listing_id {resolved_listing_id} from passed Deal ID.")
+            except Exception as guard_err:
+                logger.debug(f"Deal ID resolution guard note: {guard_err}")
+
+        context = _kwargs.get('context')
         silent = _kwargs.get('silent', False)
         notify_peer = _kwargs.get('notify_peer', True)
         notify_seeker = _kwargs.get('notify_seeker', True)
@@ -2392,19 +2426,47 @@ class DealsHandler(QueueFlushManagerMixin):
                 }
             ]
 
-            # Persist actual seeker cargo weight, currency, and mapped request_id in deals table
+            # Allowed strict platform verticals
+            ALLOWED_VERTICALS = {"housing", "vehicle", "equipment", "freight", "ride"}
+
+            # 1. Resolve vertical from input, kwargs, or domain
+            raw_vertical = str(
+                vertical_type
+                or _kwargs.get('domain')
+                or _kwargs.get('vertical')
+                or "housing"  # Default fallback to primary platform vertical
+            ).lower().strip()
+
+            # 2. Strict validation check
+            if raw_vertical not in ALLOWED_VERTICALS:
+                logger.warning(f"⚠️ Invalid or unmapped vertical '{raw_vertical}' detected. Defaulting to 'housing'.")
+                vertical_type = "housing"
+            else:
+                vertical_type = raw_vertical
+
+            # 3. Authoritative DB Single Source of Truth Override (Guarantees absolute correctness)
+            if authoritative_vertical:
+                auth_v = authoritative_vertical.lower().strip()
+                if auth_v in ALLOWED_VERTICALS:
+                    if vertical_type != auth_v:
+                        logger.warning(
+                            f"⚠️ Blocked illegal vertical switch from '{vertical_type}' to authoritative '{auth_v}'. Enforcing DB single source of truth."
+                        )
+                    vertical_type = auth_v
+
+            # Persist actual seeker cargo weight, currency, and mapped request_id in deals table with zero positional ambiguity
             deal_id = await self.db.create_pending_deal(
                 seeker_id=int(seeker_id),
                 provider_id=int(provider_id),  # ✅ Explicit keyword argument with type enforcement
-                listing_id=str(resolved_listing_id) if resolved_listing_id not in ("None", "none", "") else None,
-                request_id=str(resolved_request_id) if resolved_request_id not in ("None", "none", "") else None,
-                vertical_type=str(vertical_type or "general"),
+                listing_id=str(resolved_listing_id) if resolved_listing_id not in ("None", "none", "", None) else None,
+                request_id=str(resolved_request_id) if resolved_request_id not in ("None", "none", "", None) else None,
+                vertical_type=str(vertical_type),  # ✅ Guaranteed strict allowed platform vertical
                 current_price=float(safe_initial_offer),
-                currency=str(currency),
+                currency=str(currency),  # ✅ Explicitly save currency
                 deal_state="negotiating",
                 negotiation_history=history,
-                asset_title=str(clean_asset_title),
-                transaction_type=str(transaction_type) if transaction_type else None,
+                asset_title=str(clean_asset_title or asset_title or "Matched Asset Listing"),
+                transaction_type=str(transaction_type or "Rental"),
                 weight=float(safe_weight_baseline),
                 cargo_weight_kgs=float(safe_weight_baseline)
             )
