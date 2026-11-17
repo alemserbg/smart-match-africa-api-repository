@@ -3281,11 +3281,13 @@ class DispatchService:
                     await supabase_client.table("deals").update(update_payload).eq("id", deal_id).execute()
 
                     # 3. 🎯 Seamlessly Sync Provider Listings & Seeker Requests via Centralized Helper
-                    if hasattr(self, "_sync_listing_status_for_deal"):
+                    if hasattr(self, "db") and self.db and hasattr(self.db, "_sync_listing_status_for_deal"):
+                        await self.db._sync_listing_status_for_deal(deal_id=deal_id, deal_record=current_deal_record)
+                    elif hasattr(self, "_sync_listing_status_for_deal"):
                         await self._sync_listing_status_for_deal(deal_id=deal_id, deal_record=current_deal_record)
                     else:
                         logger.warning(
-                            f"⚠️ `_sync_listing_status_for_deal` method not found on handler instance for deal {deal_id}.")
+                            f"⚠️ `_sync_listing_status_for_deal` method not found on `self.db` or handler instance for deal {deal_id}.")
 
                     logger.info(
                         f"🎯 Payment processing & multi-table finalization completed successfully for Deal {deal_id}.")

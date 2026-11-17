@@ -276,26 +276,69 @@ async def start_currency_worker_loop(
 
 
 # ==========================================
-# DAILY MAIN MENU REPOST WORKER
+# DAILY MAIN MENU REPOST WORKER & ANIMATION
 # ==========================================
 
 def get_moving_track_banner(step: int = 0) -> str:
     """
     Generates a straight moving track banner with category emojis traveling on a bold light green line.
-
     Categories: House (🏠), Vehicle (🚗), Equipment (🚜), Freight (🚚), Ride (🚕)
     """
     emojis = ["🏠", "🚗", "🚜", "🚚", "🚕"]
     track_length = 15
     track = ["━"] * track_length
 
-    # Advance emoji positions along the track based on current step
+    # Advance emoji positions along the track safely based on current step
     for idx, emoji in enumerate(emojis):
-        pos = (step + idx * 3) % track_length
+        pos = (step + (idx * 3)) % track_length
         track[pos] = emoji
 
     # Wrap track in bold light green border indicators
     return f"🟩━{''.join(track)}━🟩"
+
+
+async def run_moving_banner_animation(
+        bot,
+        chat_id: int,
+        message_id: int,
+        base_text_generator,
+        total_frames: int = 15,
+        interval_seconds: float = 2.0
+) -> None:
+    """
+    Robust background animator that loops through banner steps and updates the Telegram message live.
+    Includes automatic fallback handling if message editing is throttled or fails.
+    """
+    try:
+        for step in range(total_frames):
+            banner = get_moving_track_banner(step=step)
+            updated_content = f"{banner}\n\n{base_text_generator(step)}"
+
+            try:
+                await bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=updated_content,
+                    parse_mode="HTML"
+                )
+            except Exception as edit_err:
+                # Handle Telegram 'not modified' harmless errors or rate limits gracefully
+                err_msg = str(edit_err).lower()
+                if "message is not modified" in err_msg:
+                    pass
+                elif "too many requests" in err_msg or "retry after" in err_msg:
+                    logger.warning(f"⚠️ Banner animation rate limited: {edit_err}. Backing off.")
+                    await asyncio.sleep(5.0)
+                else:
+                    logger.debug(f"Banner frame update skipped or ended: {edit_err}")
+                    break
+
+            await asyncio.sleep(interval_seconds)
+
+    except asyncio.CancelledError:
+        logger.info(f"🛑 Banner animation task cancelled for message {message_id} in chat {chat_id}.")
+    except Exception as ex:
+        logger.error(f"❌ Error in moving banner animation runner: {ex}", exc_info=True)
 
 
 async def run_daily_menu_repost_job(telegram_app: Any, db_client: AsyncClient) -> None:
@@ -353,7 +396,7 @@ async def run_daily_menu_repost_job(telegram_app: Any, db_client: AsyncClient) -
             banner = get_moving_track_banner(animation_step)
             animation_step = (animation_step + 1) % 15
 
-            # Multilingual message templates with top UI motion banner
+            # Multilingual message templates with top UI motion banner (Fixed Amharic string literal)
             repost_texts = {
                 "en": (
                     f"<code>{banner}</code>\n"
@@ -363,7 +406,7 @@ async def run_daily_menu_repost_job(telegram_app: Any, db_client: AsyncClient) -
                 ),
                 "am": (
                     f"<code>{banner}</code>\n"
-                    f"⚡ <b>ስማርት ማች አፍሪካ - የዕለት ገበያ ማሻሻያ</b> ⚡\n\n"
+                    f"⚡ <b>ስማርት ማች አፍሪካ\nየዕለት ገበያ ማሻሻያ</b> ⚡\n\n"
                     f"ቋሚ ማኑዩ ከዚህ በታች ታድሷል።\n\n"
                     f"👇 <b>ማስታወቂያዎችን ለመመልከት ወይም ጥያቄ ለመጀመር ከቁልፍ ሰሌዳው ላይ አማራጭ ይምረጡ፡</b>"
                 ),

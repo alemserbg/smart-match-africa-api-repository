@@ -1654,7 +1654,8 @@ class DatabaseManager:
     async def _sync_listing_status_for_deal(self, deal_id: str, deal_record: dict = None) -> None:
         """
         Robust synchronization helper ensuring both provider_listings and seeker_requests
-        are updated to 'finalized' upon deal completion.
+        are updated correctly upon deal finalization across all vertical types with
+        multi-tier smart fallbacks and time-based logistics reservation windows.
         """
         try:
             now_iso = datetime.now(timezone.utc).isoformat()
@@ -1669,11 +1670,11 @@ class DatabaseManager:
                     return
 
             listing_id = deal_record.get('listing_id')
-            request_id = deal_record.get('request_id')
+            request_id = deal_record.get('request_id') or deal_record.get('seeker_request_id')
             seeker_id = deal_record.get('seeker_id')
             vertical = str(deal_record.get('vertical_type') or '').lower().strip()
 
-            # 2. Sync Provider Listing Status
+            # 2. Sync Provider Listing Status based on Vertical Type
             if listing_id:
                 if not vertical:
                     listing_res = await self.supabase.table('provider_listings').select('vertical_type').eq('id',
@@ -1682,36 +1683,48 @@ class DatabaseManager:
                         vertical = str(listing_res.data[0].get('vertical_type', '')).lower().strip()
 
                 FIXED_ASSET_VERTICALS = {'housing', 'house', 'vehicle', 'vehicles', 'equipment', 'equipment_rental'}
+                LOGISTICS_VERTICALS = {'ride', 'freight', 'cargo', 'transport'}
 
                 if any(v in vertical for v in FIXED_ASSET_VERTICALS):
+                    # Fixed assets are permanently finalized upon deal completion
                     await self.supabase.table('provider_listings').update({
                         'status': 'finalized',
                         'availability_status': 'reserved',
                         'updated_at': now_iso
                     }).eq('id', listing_id).execute()
-                    logger.info(f"✅ Provider listing {listing_id} updated to 'finalized' (reserved).")
+                    logger.info(f"✅ Provider listing {listing_id} (Fixed Asset) updated to 'finalized'.")
+                elif any(v in vertical for v in LOGISTICS_VERTICALS):
+                    # Ride & Freight services remain active after fulfillment, but are temporarily 'reserved'
+                    # Calculate ETA + delivery duration (defaulting to 120 mins or using deal transit duration)
+                    transit_mins = int(deal_record.get('transit_duration_minutes') or 120)
+                    reserved_until = (datetime.now(timezone.utc) + timedelta(minutes=transit_mins)).isoformat()
+
+                    await self.supabase.table('provider_listings').update({
+                        'status': 'reserved',
+                        'reserved_until': reserved_until,
+                        'updated_at': now_iso
+                    }).eq('id', listing_id).execute()
+                    logger.info(
+                        f"✅ Provider listing {listing_id} (Logistics) updated to 'reserved' until {reserved_until}.")
                 else:
-                    logger.info(f"ℹ️ Dynamic service listing {listing_id} retained as 'active'.")
+                    logger.info(f"ℹ️ Dynamic/Uncategorized service listing {listing_id} retained/processed.")
 
             # 3. Multi-Tier Smart Fallback for Seeker Request Resolution
             if not request_id and seeker_id:
                 try:
-                    # Tier A: Try finding any unfinalized request for this seeker and vertical
-                    query = self.supabase.table('seeker_requests').select('id, status') \
-                        .eq('seeker_id', seeker_id)
-
+                    # Tier A: Try finding any active/pending/negotiating request for this seeker and vertical
+                    query = self.supabase.table('seeker_requests').select('id, status').eq('seeker_id', seeker_id)
                     if vertical:
                         query = query.eq('vertical_type', vertical)
 
                     req_res = await query.order('created_at', desc=True).limit(5).execute()
 
                     if req_res and req_res.data:
-                        # Filter for active/pending/negotiating first
                         active_reqs = [r for r in req_res.data if
                                        r.get('status') in ['active', 'pending', 'negotiating']]
                         target_req = active_reqs[0] if active_reqs else req_res.data[0]
-
                         request_id = target_req.get('id')
+
                         logger.info(
                             f"💡 Smart resolved seeker request ID {request_id} for deal {deal_id} (vertical: {vertical})")
 
@@ -1736,7 +1749,7 @@ class DatabaseManager:
                 except Exception as abs_err:
                     logger.error(f"Absolute fallback failed: {abs_err}")
 
-            # 4. Sync Seeker Request Status to 'finalized' with Guaranteed Execution
+            # 4. Sync Seeker Request Status to 'finalized' with Guaranteed Execution Logging
             if request_id:
                 update_res = await self.supabase.table('seeker_requests').update({
                     'status': 'finalized',
@@ -1744,7 +1757,8 @@ class DatabaseManager:
                 }).eq('id', request_id).execute()
 
                 if update_res and getattr(update_res, 'data', None):
-                    logger.info(f"✅ Seeker request {request_id} status successfully updated to 'finalized'.")
+                    logger.info(
+                        f"✅ Seeker request {request_id} status successfully updated from 'active' to 'finalized'.")
                 else:
                     logger.warning(
                         f"⚠️ Seeker request {request_id} update executed, but no matching record returned data.")

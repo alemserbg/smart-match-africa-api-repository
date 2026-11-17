@@ -338,6 +338,70 @@ class ReservationHelper:
             logger.error(f"Error executing 48h expiration rollback: {e}")
             return 0
 
+    @staticmethod
+    async def process_logistics_status_rollbacks(supabase: Any) -> int:
+        """
+        Background periodic task that:
+        1. Rolls back 'reserved' provider_listings (ride/freight) to 'active' once ETA + delivery time expires.
+        2. Expires 'active' seeker_requests for 'ride' (> 1 day) and 'freight' (> 3 days) without a match.
+        """
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        processed_count = 0
+
+        try:
+            # -----------------------------------------------------------------
+            # A. ROLLBACK PROVIDER LISTINGS FROM 'reserved' -> 'active'
+            # -----------------------------------------------------------------
+            reserved_listings = await supabase.table('provider_listings').select(
+                'id, vertical_type, reserved_until'
+            ).eq('status', 'reserved').lte('reserved_until', now_utc.isoformat()).execute()
+
+            for listing in (reserved_listings.data or []):
+                listing_id = listing['id']
+                await supabase.table('provider_listings').update({
+                    'status': 'active',
+                    'reserved_until': None,
+                    'updated_at': now_utc.isoformat()
+                }).eq('id', listing_id).execute()
+                processed_count += 1
+                logger.info(f"🔄 Provider listing {listing_id} rolled back from 'reserved' to 'active'.")
+
+            # -----------------------------------------------------------------
+            # B. EXPIRE UNMATCHED SEEKER REQUESTS (Ride > 1 day, Freight > 3 days)
+            # -----------------------------------------------------------------
+            ride_threshold = (now_utc - datetime.timedelta(days=1)).isoformat()
+            freight_threshold = (now_utc - datetime.timedelta(days=3)).isoformat()
+
+            # Expire old ride requests (> 1 day)
+            old_rides = await supabase.table('seeker_requests').select('id').eq('status', 'active').eq('vertical_type',
+                                                                                                       'ride').lt(
+                'created_at', ride_threshold).execute()
+            for req in (old_rides.data or []):
+                await supabase.table('seeker_requests').update({
+                    'status': 'expired',
+                    'updated_at': now_utc.isoformat()
+                }).eq('id', req['id']).execute()
+                processed_count += 1
+                logger.info(f"⏰ Seeker request {req['id']} (Ride) permanently updated to 'expired' (> 1 day waiting).")
+
+            # Expire old freight requests (> 3 days)
+            old_freights = await supabase.table('seeker_requests').select('id').eq('status', 'active').eq(
+                'vertical_type', 'freight').lt('created_at', freight_threshold).execute()
+            for req in (old_freights.data or []):
+                await supabase.table('seeker_requests').update({
+                    'status': 'expired',
+                    'updated_at': now_utc.isoformat()
+                }).eq('id', req['id']).execute()
+                processed_count += 1
+                logger.info(
+                    f"⏰ Seeker request {req['id']} (Freight) permanently updated to 'expired' (> 3 days waiting).")
+
+            return processed_count
+
+        except Exception as e:
+            logger.error(f"Error processing logistics status rollbacks and expirations: {e}", exc_info=True)
+            return 0
+
     # ==========================================
     # 2. LOGISTICS: CAPACITY & TIME-BASED RESERVATION
     # ==========================================
