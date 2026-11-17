@@ -3,7 +3,7 @@ import json
 import uuid
 import math
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import inspect
 from typing import Optional, Any, Dict, Tuple, List, Callable
 import socket
@@ -1651,7 +1651,7 @@ class DatabaseManager:
         }).eq('id', deal_id).execute()
         return len(response.data) > 0
 
-    async def _sync_listing_status_for_deal(self, deal_id: str, deal_record: dict = None) -> None:
+    async def sync_listing_status_for_deal(self, deal_id: str, deal_record: dict = None) -> None:
         """
         Robust synchronization helper ensuring both provider_listings and seeker_requests
         are updated correctly upon deal finalization across all vertical types with
@@ -1800,7 +1800,7 @@ class DatabaseManager:
 
             # 🛠️ CASCADE LISTING STATUS UPDATE ON FINALIZED
             if success and safe_status == 'finalized':
-                await self._sync_listing_status_for_deal(deal_id, deal_record)
+                await self.sync_listing_status_for_deal(deal_id, deal_record)
 
             return success
 
@@ -1849,7 +1849,7 @@ class DatabaseManager:
 
             # 🛠️ CASCADE LISTING STATUS UPDATE ON FINALIZED
             if success and safe_state == 'finalized':
-                await self._sync_listing_status_for_deal(deal_id, deal_record)
+                await self.sync_listing_status_for_deal(deal_id, deal_record)
 
             return success
         except Exception as e:

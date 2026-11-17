@@ -3282,7 +3282,7 @@ class DispatchService:
 
                     # 3. 🎯 Seamlessly Sync Provider Listings & Seeker Requests via Centralized Helper
                     if hasattr(self, "db") and self.db and hasattr(self.db, "_sync_listing_status_for_deal"):
-                        await self.db._sync_listing_status_for_deal(deal_id=deal_id, deal_record=current_deal_record)
+                        await self.db.sync_listing_status_for_deal(deal_id=deal_id, deal_record=current_deal_record)
                     elif hasattr(self, "_sync_listing_status_for_deal"):
                         await self._sync_listing_status_for_deal(deal_id=deal_id, deal_record=current_deal_record)
                     else:
