@@ -4,6 +4,7 @@ import json
 import re
 from typing import Dict, Any, Optional, List, Tuple
 import asyncio
+from datetime import datetime, timezone
 from deep_translator import GoogleTranslator
 import html
 import telegram
@@ -194,13 +195,38 @@ class EquipmentRentalHandler:
         self.queue = queue_manager
         self.deals = deals_handler
 
+    @staticmethod
+    async def finalize_accepted_counter_offer(db_client, deal_id: str, final_agreed_price: float) -> bool:
+        """
+        Ensures the deals table stores the exact final agreed price
+        prior to triggering commission checkout generation.
+        """
+        try:
+            now_iso = datetime.now(timezone.utc).isoformat()
+
+            # Update the deal record with the correct agreed price using db_client
+            await db_client.table('deals').update({
+                'agreed_price': final_agreed_price,
+                'current_price': final_agreed_price,
+                'price': final_agreed_price,
+                'status': 'accepted',
+                'updated_at': now_iso
+            }).eq('id', deal_id).execute()
+
+            logger.info(f"✅ Deal {deal_id} successfully synchronized with final agreed price: {final_agreed_price} ETB")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Failed to synchronize final agreed price for deal {deal_id}: {e}", exc_info=True)
+            return False
+
     async def deal_accept_handler(
             self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> Optional[int]:
         """
         Handles the 'equip_deal_accept:' callback.
         Extracts the deal ID, fetches the fresh deal record from Supabase,
-        and delegates execution to _execute_deal_acceptance without silent failures.
+        synchronizes the final accepted counter-offer price in the database,
+        and delegates execution to execute_deal_acceptance without silent failures.
         """
         query = update.callback_query
         if not query:
@@ -235,6 +261,44 @@ class EquipmentRentalHandler:
             except Exception:
                 pass
             return None
+
+        # Resolve the freshest accepted counter-offer price across all reliable sources
+        final_agreed_price = None
+        history = deal_record.get('negotiation_history')
+        if isinstance(history, list) and history:
+            last_entry = history[-1]
+            if isinstance(last_entry, dict):
+                final_agreed_price = (
+                        last_entry.get('proposed_price')
+                        or last_entry.get('price')
+                        or last_entry.get('offer')
+                )
+
+        if not final_agreed_price:
+            final_agreed_price = (
+                    deal_record.get('current_price')
+                    or deal_record.get('agreed_price')
+                    or deal_record.get('price')
+            )
+
+        # Synchronize final accepted price in Supabase and in-memory deal_record prior to execution
+        if final_agreed_price is not None and supabase_client and hasattr(supabase_client, "table"):
+            try:
+                resolved_float_price = float(final_agreed_price)
+                if resolved_float_price > 0:
+                    await self.finalize_accepted_counter_offer(
+                        db_client=supabase_client,
+                        deal_id=deal_id_str,
+                        final_agreed_price=resolved_float_price
+                    )
+                    # Keep the in-memory dictionary aligned for downstream handlers & billing
+                    deal_record['agreed_price'] = resolved_float_price
+                    deal_record['current_price'] = resolved_float_price
+                    deal_record['price'] = resolved_float_price
+                    deal_record['status'] = 'accepted'
+            except (ValueError, TypeError) as price_err:
+                logger.warning(
+                    f"Could not parse final_agreed_price '{final_agreed_price}' for deal {deal_id_str}: {price_err}")
 
         # Delegate directly to the robust centralized deal acceptance executor
         if hasattr(self, "execute_deal_acceptance"):
@@ -4529,30 +4593,35 @@ class EquipmentRentalHandler:
                     or "Rental"
             )
 
-            # FIX: Suppress internal notification dispatch in initiate_negotiation by setting notify=False and omitting bot
+            # FIX: Robust invocation of initiate_negotiation with explicit keyword arguments
+            # ensuring provider_id and listing_id are never missing.
             if hasattr(deals_module, "initiate_negotiation"):
                 try:
                     deal_id_str = await deals_module.initiate_negotiation(
                         seeker_id=safe_int(seeker_id),
                         provider_id=safe_int(provider_id),
-                        listing_id=listing_id,
+                        listing_id=str(listing_id) if listing_id not in ("None", "none", "", None) else None,
                         vertical_type="equipment",
-                        initial_offer=agreed_price,
-                        asset_title=prop_eq,
-                        is_reverse=is_reverse,
+                        initial_offer=float(agreed_price),
+                        current_price=float(agreed_price),
+                        asset_title=str(prop_eq),
+                        is_reverse=bool(is_reverse),
+                        transaction_type=str(raw_transaction_type),
                         notify=False,
                     )
-                except TypeError:
+                except TypeError as te:
+                    logger.warning(f"⚠️ Falling back to standard initiate_negotiation signature due to TypeError: {te}")
                     deal_id_str = await deals_module.initiate_negotiation(
                         seeker_id=safe_int(seeker_id),
                         provider_id=safe_int(provider_id),
-                        listing_id=listing_id,
+                        listing_id=str(listing_id) if listing_id not in ("None", "none", "", None) else None,
                         vertical_type="equipment",
-                        initial_offer=agreed_price,
-                        asset_title=prop_eq,
-                        is_reverse=is_reverse,
+                        initial_offer=float(agreed_price),
+                        asset_title=str(prop_eq),
+                        is_reverse=bool(is_reverse),
                     )
             else:
+                logger.error("❌ CRITICAL: `initiate_negotiation` not found on deals_module.")
                 deal_id_str = None
 
             if deal_id_str:
