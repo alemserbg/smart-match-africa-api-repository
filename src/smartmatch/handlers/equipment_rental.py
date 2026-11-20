@@ -3319,184 +3319,266 @@ class EquipmentRentalHandler:
             self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> int:
         """
-        Handles prompt custom offer with absolute database ground-truth enforcement
-        and robust, precise equipment and location extraction across deals, seeker_requests, and provider_listings
-        for both forward and reverse matching workflows, ensuring Asking Rate prioritizes provider listing price.
+        Handles prompt custom offer with schema-aligned database ground-truth enforcement
+        across deals, provider_listings, and seeker_requests for both forward and reverse
+        matching workflows, prioritizing provider listing price and accurate currency.
         """
         query = update.callback_query
+        parsed_listing_id: Optional[str] = None
+        parsed_request_id: Optional[str] = None
+
         if query:
             await query.answer()
             if query.data and ":" in query.data:
-                match_id = query.data.split(":")[1]
-                context.user_data["active_equipment_deal_id"] = match_id
+                parts = [p.strip() for p in query.data.split(":") if p.strip()]
+                if len(parts) >= 2:
+                    context.user_data["active_equipment_deal_id"] = parts[1]
+                if len(parts) >= 3 and parts[2].lower() not in ("none", "null", ""):
+                    parsed_listing_id = parts[2]
+                    context.user_data["active_equipment_listing_id"] = parsed_listing_id
+                if len(parts) >= 4 and parts[3].lower() not in ("none", "null", ""):
+                    parsed_request_id = parts[3]
+                    context.user_data["active_equipment_request_id"] = parsed_request_id
 
         effective_uid = update.effective_user.id if update.effective_user else 0
         user_lang = await self._resolve_user_language_db_first(effective_uid, context)
 
         active_deal_id = str(
             context.user_data.get("active_equipment_deal_id", "pending")
+        ).strip()
+        listing_id: Optional[str] = (
+                parsed_listing_id
+                or context.user_data.get("active_equipment_listing_id")
+        )
+        request_id: Optional[str] = (
+                parsed_request_id
+                or context.user_data.get("active_equipment_request_id")
         )
 
         # ========================================================================
-        # SINGLE SOURCE OF TRUTH: Initialize variables strictly from DB
+        # SINGLE SOURCE OF TRUTH: Initialize variables strictly from DB / context
         # ========================================================================
         is_reverse = False
         asking_price: float = 0.0
-        resolved_currency: str = "ETB"
-        fetched_req_loc = None
-        fetched_prop_loc = None
-        model_name = None
-        brand_name = None
-        property_use = None
-        raw_cap_val = None
-        req_eq = None
-        list_eq = None
+        deal_currency: Optional[str] = None
+        listing_currency: Optional[str] = None
+        request_currency: Optional[str] = None
+        fetched_req_loc: Optional[str] = None
+        fetched_prop_loc: Optional[str] = None
+        model_name: Optional[str] = None
+        brand_name: Optional[str] = None
+        property_use: Optional[str] = None
+        raw_cap_val: Any = None
+        req_eq: Optional[str] = None
+        list_eq: Optional[str] = None
+        seeker_id_from_deal: Optional[int] = None
+        vertical_from_deal: str = "equipment"
 
-        def clean_text(val) -> str | None:
-            if not val:
+        def clean_text(val: Any) -> Optional[str]:
+            if val is None:
                 return None
             s = str(val).strip()
-            if not s or s.lower() in ["n/a", "none", "null", "-"]:
+            if not s or s.lower() in {"n/a", "none", "null", "-", "not specified", "nan"}:
                 return None
             return s
 
-        if active_deal_id != "pending" and hasattr(self, "db") and self.db:
-            try:
-                # 1. Fetch from deals table
-                deal_res = (
-                    await self.db.table("deals")
-                    .select(
-                        "current_price, agreed_price, listing_id, request_id, currency, seeker_id, provider_id, vertical_type, origin, destination, asset_title"
+        def clean_currency(val: Any) -> Optional[str]:
+            cleaned = clean_text(val)
+            if not cleaned:
+                return None
+            upper = cleaned.upper()
+            if upper in {"$", "US$"}:
+                return "USD"
+            if upper in {"ብር", "BIRR"}:
+                return "ETB"
+            return upper
+
+        db_client = getattr(self, "db", None)
+
+        if db_client and hasattr(db_client, "table"):
+            # 1. Fetch from `deals` table using exact schema columns
+            if active_deal_id and active_deal_id.lower() not in {"pending", "none", "null"}:
+                try:
+                    deal_res = (
+                        await db_client.table("deals")
+                        .select(
+                            "id, seeker_id, provider_id, listing_id, request_id, vertical_type, "
+                            "current_price, agreed_price, currency, origin, destination, asset_title"
+                        )
+                        .eq("id", active_deal_id)
+                        .maybe_single()
+                        .execute()
                     )
-                    .eq("id", active_deal_id)
-                    .maybe_single()
-                    .execute()
+                    ddata = getattr(deal_res, "data", None) if deal_res else None
+                    if isinstance(ddata, dict) and ddata:
+                        if safe_int(ddata.get("seeker_id")) == effective_uid and effective_uid:
+                            is_reverse = True
+
+                        seeker_id_from_deal = safe_int(ddata.get("seeker_id")) or None
+                        vertical_from_deal = clean_text(ddata.get("vertical_type")) or "equipment"
+                        listing_id = clean_text(ddata.get("listing_id")) or listing_id
+                        request_id = clean_text(ddata.get("request_id")) or request_id
+
+                        model_name = clean_text(ddata.get("asset_title")) or model_name
+                        fetched_req_loc = clean_text(ddata.get("origin"))
+                        fetched_prop_loc = clean_text(ddata.get("destination"))
+                        deal_currency = clean_currency(ddata.get("currency"))
+
+                        deal_price = safe_float(ddata.get("current_price"), 0.0)
+                        if deal_price <= 0:
+                            deal_price = safe_float(ddata.get("agreed_price"), 0.0)
+                        if deal_price > 0:
+                            asking_price = deal_price
+                except Exception as d_err:
+                    logger.warning(
+                        f"Could not fetch deal '{active_deal_id}' in prompt_custom_offer: {d_err}"
+                    )
+
+            # 2. Fetch from `provider_listings` using exact schema columns
+            if listing_id:
+                try:
+                    listing_res = (
+                        await db_client.table("provider_listings")
+                        .select(
+                            "id, price, currency, location_text, location, operating_region, "
+                            "destination_text, property_use, brand, make_model_year, "
+                            "vehicle_type, equipment_type, capacity_output"
+                        )
+                        .eq("id", listing_id)
+                        .maybe_single()
+                        .execute()
+                    )
+                    ldata = getattr(listing_res, "data", None) if listing_res else None
+                    if isinstance(ldata, dict) and ldata:
+                        prop_loc_candidate = (
+                                clean_text(ldata.get("location_text"))
+                                or clean_text(ldata.get("location"))
+                                or clean_text(ldata.get("operating_region"))
+                                or clean_text(ldata.get("destination_text"))
+                        )
+                        if prop_loc_candidate:
+                            fetched_prop_loc = prop_loc_candidate
+
+                        listing_price = safe_float(ldata.get("price"), 0.0)
+                        has_valid_listing_price = listing_price > 0
+                        if asking_price <= 0 and has_valid_listing_price:
+                            asking_price = listing_price
+
+                        listing_currency = clean_currency(ldata.get("currency"))
+
+                        listing_equip = (
+                                clean_text(ldata.get("equipment_type"))
+                                or clean_text(ldata.get("make_model_year"))
+                                or clean_text(ldata.get("vehicle_type"))
+                        )
+                        generic_categories = {
+                            "construction & earthmoving",
+                            "agriculture & irrigation",
+                            "generators & power",
+                            "event tech & commercial",
+                            "residential",
+                            "commercial",
+                        }
+                        if listing_equip and listing_equip.lower() not in generic_categories:
+                            list_eq = listing_equip
+                            model_name = listing_equip
+
+                        brand_name = clean_text(ldata.get("brand")) or brand_name
+                        if ldata.get("capacity_output") is not None:
+                            raw_cap_val = ldata.get("capacity_output")
+                        property_use = clean_text(ldata.get("property_use")) or property_use
+                except Exception as l_err:
+                    logger.warning(
+                        f"Could not fetch provider_listing '{listing_id}' in prompt_custom_offer: {l_err}"
+                    )
+
+            # 3. Fetch from `seeker_requests` using exact schema columns (with seeker_id fallback)
+            try:
+                rdata = None
+                if request_id:
+                    req_res = (
+                        await db_client.table("seeker_requests")
+                        .select(
+                            "id, seeker_id, vertical_type, equipment_type, property_use, "
+                            "vehicle_type, make_model_year, capacity_output, currency, "
+                            "location_text, destination_text, operating_region, preferred_brand, max_budget"
+                        )
+                        .eq("id", request_id)
+                        .maybe_single()
+                        .execute()
+                    )
+                    rdata = getattr(req_res, "data", None) if req_res else None
+                else:
+                    target_seeker = seeker_id_from_deal or (effective_uid if is_reverse else None)
+                    if target_seeker:
+                        latest_res = (
+                            await db_client.table("seeker_requests")
+                            .select(
+                                "id, seeker_id, vertical_type, equipment_type, property_use, "
+                                "vehicle_type, make_model_year, capacity_output, currency, "
+                                "location_text, destination_text, operating_region, preferred_brand, max_budget"
+                            )
+                            .eq("seeker_id", target_seeker)
+                            .eq("vertical_type", vertical_from_deal)
+                            .order("created_at", desc=True)
+                            .limit(1)
+                            .execute()
+                        )
+                        rows = getattr(latest_res, "data", None) if latest_res else None
+                        if isinstance(rows, list) and rows:
+                            rdata = rows[0]
+
+                if isinstance(rdata, dict) and rdata:
+                    req_loc_candidate = (
+                            clean_text(rdata.get("location_text"))
+                            or clean_text(rdata.get("destination_text"))
+                            or clean_text(rdata.get("operating_region"))
+                    )
+                    if req_loc_candidate:
+                        fetched_req_loc = req_loc_candidate
+
+                    request_currency = clean_currency(rdata.get("currency"))
+
+                    # NOTE: Seeker max_budget is intentionally NOT used for asking_price
+                    # so Asking Rate remains bound to the deal/provider listing price.
+
+                    req_eq = (
+                            clean_text(rdata.get("equipment_type"))
+                            or clean_text(rdata.get("make_model_year"))
+                            or clean_text(rdata.get("property_use"))
+                            or clean_text(rdata.get("vehicle_type"))
+                    )
+                    if req_eq and not model_name:
+                        model_name = req_eq
+
+                    if rdata.get("capacity_output") is not None and raw_cap_val is None:
+                        raw_cap_val = rdata.get("capacity_output")
+                    brand_name = clean_text(rdata.get("preferred_brand")) or brand_name
+            except Exception as r_err:
+                logger.warning(
+                    f"Could not fetch seeker_request in prompt_custom_offer: {r_err}"
                 )
 
-                if deal_res and hasattr(deal_res, "data") and deal_res.data:
-                    ddata = deal_res.data
-                    current_user_id = effective_uid
+        # Resolve currency reliably: prefer explicit USD from listing/request/deal/context
+        context_currency = (
+            clean_currency(context.user_data.get("currency"))
+            if isinstance(context.user_data, dict)
+            else None
+        )
+        candidate_currencies = [c for c in [listing_currency, request_currency, deal_currency, context_currency] if c]
+        if "USD" in candidate_currencies:
+            resolved_currency = "USD"
+        elif candidate_currencies:
+            resolved_currency = candidate_currencies[0]
+        else:
+            resolved_currency = "ETB"
 
-                    if safe_int(ddata.get("seeker_id")) == current_user_id:
-                        is_reverse = True
+        if asking_price <= 0 and isinstance(context.user_data, dict):
+            asking_price = safe_float(
+                context.user_data.get("asking_price") or context.user_data.get("current_price"),
+                0.0,
+            )
 
-                    if clean_text(ddata.get("asset_title")):
-                        model_name = clean_text(ddata.get("asset_title"))
-
-                    if ddata.get("origin"):
-                        fetched_req_loc = clean_text(ddata.get("origin"))
-                    if ddata.get("destination"):
-                        fetched_prop_loc = clean_text(ddata.get("destination"))
-
-                    if ddata.get("currency"):
-                        resolved_currency = str(ddata["currency"]).strip().upper()
-
-                    # Prioritize active deal pricing if already established
-                    deal_price = safe_float(ddata.get("current_price")) or safe_float(ddata.get("agreed_price"))
-                    if deal_price > 0:
-                        asking_price = deal_price
-
-                    # 2. Fetch from provider_listings table using listing_id FIRST to prioritize provider's asking price
-                    listing_id = ddata.get("listing_id")
-                    if listing_id:
-                        listing_res = (
-                            await self.db.table("provider_listings")
-                            .select(
-                                "price, property_use, location_text, location, operating_region, destination_text, brand, make_model_year, currency, equipment_type, vehicle_type, capacity_output"
-                            )
-                            .eq("id", listing_id)
-                            .maybe_single()
-                            .execute()
-                        )
-                        if listing_res and hasattr(listing_res, "data") and listing_res.data:
-                            ldata = listing_res.data
-
-                            # Robust Provider Asset Location extraction
-                            fetched_prop_loc = (
-                                    clean_text(ldata.get("location_text"))
-                                    or clean_text(ldata.get("location"))
-                                    or clean_text(ldata.get("operating_region"))
-                                    or clean_text(ldata.get("destination_text"))
-                                    or fetched_prop_loc
-                            )
-
-                            # Prioritize provider listing price as the primary asking price if deal price isn't set
-                            if asking_price <= 0 and ldata.get("price") is not None:
-                                asking_price = safe_float(ldata["price"])
-
-                            if resolved_currency == "ETB" and ldata.get("currency"):
-                                resolved_currency = str(ldata["currency"]).strip().upper()
-
-                            # Extract exact equipment name/model from provider listing
-                            listing_equip = (
-                                    clean_text(ldata.get("equipment_type"))
-                                    or clean_text(ldata.get("make_model_year"))
-                                    or clean_text(ldata.get("vehicle_type"))
-                            )
-
-                            generic_categories = [
-                                "construction & earthmoving", "agriculture & irrigation",
-                                "generators & power", "event tech & commercial", "residential",
-                                "commercial"
-                            ]
-                            if listing_equip and listing_equip.lower() not in generic_categories:
-                                list_eq = listing_equip
-                                model_name = listing_equip
-
-                            if ldata.get("brand"):
-                                brand_name = ldata.get("brand")
-                            if ldata.get("capacity_output"):
-                                raw_cap_val = ldata.get("capacity_output")
-                            if ldata.get("property_use"):
-                                property_use = ldata.get("property_use")
-
-                    # 3. Fetch from seeker_requests table using request_id (for seeker location & equipment preference)
-                    request_id = ddata.get("request_id")
-                    if request_id:
-                        req_res = (
-                            await self.db.table("seeker_requests")
-                            .select(
-                                "equipment_type, property_use, vehicle_type, capacity_output, currency, location_text, location, operating_region, destination_text, preferred_brand, max_budget"
-                            )
-                            .eq("id", request_id)
-                            .maybe_single()
-                            .execute()
-                        )
-                        if req_res and hasattr(req_res, "data") and req_res.data:
-                            rdata = req_res.data
-
-                            # Robust Seeker Location extraction
-                            fetched_req_loc = (
-                                    clean_text(rdata.get("location_text"))
-                                    or clean_text(rdata.get("location"))
-                                    or clean_text(rdata.get("operating_region"))
-                                    or clean_text(rdata.get("destination_text"))
-                                    or fetched_req_loc
-                            )
-
-                            if resolved_currency == "ETB" and rdata.get("currency"):
-                                resolved_currency = str(rdata["currency"]).strip().upper()
-
-                            # NOTE: Seeker max_budget fallback is intentionally removed here
-                            # so Asking Rate absolutely remains bound to the provider's listing price.
-
-                            req_eq = (
-                                    clean_text(rdata.get("equipment_type"))
-                                    or clean_text(rdata.get("property_use"))
-                                    or clean_text(rdata.get("vehicle_type"))
-                            )
-                            if req_eq and not model_name:
-                                model_name = req_eq
-
-                            if rdata.get("capacity_output") and not raw_cap_val:
-                                raw_cap_val = rdata.get("capacity_output")
-                            if rdata.get("preferred_brand") and not brand_name:
-                                brand_name = rdata.get("preferred_brand")
-
-            except Exception as _err:
-                logger.warning(f"Could not fetch deal ground-truth metadata in prompt_custom_offer: {_err}")
-
-        # Fallback assignments if values remain unpopulated
         req_loc = fetched_req_loc or "Not Specified"
         prop_loc = fetched_prop_loc or "Not Specified"
         currency = resolved_currency
