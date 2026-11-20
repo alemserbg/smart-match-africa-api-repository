@@ -198,25 +198,31 @@ class EquipmentRentalHandler:
     @staticmethod
     async def finalize_accepted_counter_offer(db_client, deal_id: str, final_agreed_price: float) -> bool:
         """
-        Ensures the deals table stores the exact final agreed price
+        Ensures the deals table stores the exact final agreed price using valid
+        schema columns ('agreed_price', 'current_price', 'status', 'deal_state', 'updated_at')
         prior to triggering commission checkout generation.
         """
         try:
             now_iso = datetime.now(timezone.utc).isoformat()
 
-            # Update the deal record with the correct agreed price using db_client
+            # Update only existing schema columns on `deals` (no `price` column exists in `deals`)
             await db_client.table('deals').update({
                 'agreed_price': final_agreed_price,
                 'current_price': final_agreed_price,
-                'price': final_agreed_price,
                 'status': 'accepted',
-                'updated_at': now_iso
+                'deal_state': 'accepted',
+                'updated_at': now_iso,
             }).eq('id', deal_id).execute()
 
-            logger.info(f"✅ Deal {deal_id} successfully synchronized with final agreed price: {final_agreed_price} ETB")
+            logger.info(
+                f"✅ Deal {deal_id} successfully synchronized with final agreed price: {final_agreed_price}"
+            )
             return True
         except Exception as e:
-            logger.error(f"❌ Failed to synchronize final agreed price for deal {deal_id}: {e}", exc_info=True)
+            logger.error(
+                f"❌ Failed to synchronize final agreed price for deal {deal_id}: {e}",
+                exc_info=True,
+            )
             return False
 
     async def deal_accept_handler(
@@ -247,8 +253,13 @@ class EquipmentRentalHandler:
         supabase_client = getattr(self.db, 'supabase', None) or getattr(self, 'db', None)
         if supabase_client and hasattr(supabase_client, "table"):
             try:
-                deal_res = await supabase_client.table('deals').select('*').eq('id',
-                                                                               deal_id_str).maybe_single().execute()
+                deal_res = (
+                    await supabase_client.table('deals')
+                    .select('*')
+                    .eq('id', deal_id_str)
+                    .maybe_single()
+                    .execute()
+                )
                 if deal_res and getattr(deal_res, 'data', None):
                     deal_record = deal_res.data
             except Exception as d_err:
@@ -262,43 +273,52 @@ class EquipmentRentalHandler:
                 pass
             return None
 
-        # Resolve the freshest accepted counter-offer price across all reliable sources
+        # Resolve the freshest accepted counter-offer price across negotiation_history and deal columns
         final_agreed_price = None
+        resolved_currency = deal_record.get('currency')
         history = deal_record.get('negotiation_history')
+        if isinstance(history, str):
+            try:
+                history = json.loads(history)
+            except Exception:
+                history = None
+
         if isinstance(history, list) and history:
-            last_entry = history[-1]
-            if isinstance(last_entry, dict):
-                final_agreed_price = (
-                        last_entry.get('proposed_price')
-                        or last_entry.get('price')
-                        or last_entry.get('offer')
-                )
+            for entry in reversed(history):
+                if isinstance(entry, dict):
+                    candidate = (
+                            entry.get('offer')
+                            or entry.get('proposed_price')
+                            or entry.get('price')
+                    )
+                    if candidate is not None and safe_float(candidate, 0.0) > 0:
+                        final_agreed_price = candidate
+                        if entry.get('currency'):
+                            resolved_currency = str(entry.get('currency')).strip().upper()
+                        break
 
         if not final_agreed_price:
             final_agreed_price = (
                     deal_record.get('current_price')
                     or deal_record.get('agreed_price')
-                    or deal_record.get('price')
             )
 
         # Synchronize final accepted price in Supabase and in-memory deal_record prior to execution
         if final_agreed_price is not None and supabase_client and hasattr(supabase_client, "table"):
-            try:
-                resolved_float_price = float(final_agreed_price)
-                if resolved_float_price > 0:
-                    await self.finalize_accepted_counter_offer(
-                        db_client=supabase_client,
-                        deal_id=deal_id_str,
-                        final_agreed_price=resolved_float_price
-                    )
-                    # Keep the in-memory dictionary aligned for downstream handlers & billing
-                    deal_record['agreed_price'] = resolved_float_price
-                    deal_record['current_price'] = resolved_float_price
-                    deal_record['price'] = resolved_float_price
-                    deal_record['status'] = 'accepted'
-            except (ValueError, TypeError) as price_err:
-                logger.warning(
-                    f"Could not parse final_agreed_price '{final_agreed_price}' for deal {deal_id_str}: {price_err}")
+            resolved_float_price = safe_float(final_agreed_price, 0.0)
+            if resolved_float_price > 0:
+                await self.finalize_accepted_counter_offer(
+                    db_client=supabase_client,
+                    deal_id=deal_id_str,
+                    final_agreed_price=resolved_float_price,
+                )
+                # Keep the in-memory dictionary aligned with `deals` schema columns for downstream handlers & billing
+                deal_record['agreed_price'] = resolved_float_price
+                deal_record['current_price'] = resolved_float_price
+                deal_record['status'] = 'accepted'
+                deal_record['deal_state'] = 'accepted'
+                if resolved_currency:
+                    deal_record['currency'] = resolved_currency
 
         # Delegate directly to the robust centralized deal acceptance executor
         if hasattr(self, "execute_deal_acceptance"):
