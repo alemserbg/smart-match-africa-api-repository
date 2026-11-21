@@ -402,19 +402,19 @@ async def run_daily_menu_repost_job(telegram_app: Any, db_client: AsyncClient) -
                     f"<code>{banner}</code>\n"
                     f"⚡ <b>SMART MATCH AFRICA - DAILY MARKETPLACE UPDATE</b> ⚡\n\n"
                     f"Your permanent menu has been refreshed below.\n\n"
-                    f"👇 <b>Select an option from the keyboard to browse listings or start a request:</b>"
+                    f"👇 <b>Select an option below to either list or request assets and services:</b>"
                 ),
                 "am": (
                     f"<code>{banner}</code>\n"
                     f"⚡ <b>ስማርት ማች አፍሪካ\nየዕለት ገበያ ማሻሻያ</b> ⚡\n\n"
                     f"ቋሚ ማኑዩ ከዚህ በታች ታድሷል።\n\n"
-                    f"👇 <b>ማስታወቂያዎችን ለመመልከት ወይም ጥያቄ ለመጀመር ከቁልፍ ሰሌዳው ላይ አማራጭ ይምረጡ፡</b>"
+                    f"👇 <b>ንብረቶችን ወይም አገልግሎቶችን ለመመዝገብ ወይም ለመጠየቅ ከታች ካሉት አማራጮች አንዱን ይምረጡ፦</b>"
                 ),
                 "om": (
                     f"<code>{banner}</code>\n"
                     f"⚡ <b>SMART MATCH AFRICA - HAAROMSA GABOOWAA GUUTUU</b> ⚡\n\n"
                     f"Menuun keessan kan dhaabbataa ta'e armaan gadiitti haaromfameera.\n\n"
-                    f"👇 <b>Beeksisoota ilaaluuf ykn gaaffii jalqabuuf keyboard irraa filannoo filadhaa:</b>"
+                    f"👇 <b>Qabeenya ykn tajaajila galmeessuuf ykn gaafachuuf filannoowwan armaan gadii keessaa tokko filadhaa:</b>"
                 )
             }
 

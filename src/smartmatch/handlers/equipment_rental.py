@@ -3344,6 +3344,7 @@ class EquipmentRentalHandler:
         matching workflows, prioritizing provider listing price and accurate currency.
         """
         query = update.callback_query
+        parsed_id: Optional[str] = None
         parsed_listing_id: Optional[str] = None
         parsed_request_id: Optional[str] = None
 
@@ -3351,7 +3352,8 @@ class EquipmentRentalHandler:
             await query.answer()
             if query.data and ":" in query.data:
                 parts = [p.strip() for p in query.data.split(":") if p.strip()]
-                if len(parts) >= 2:
+                if len(parts) >= 2 and parts[1].lower() not in ("none", "null", ""):
+                    parsed_id = parts[1]
                     context.user_data["active_equipment_deal_id"] = parts[1]
                 if len(parts) >= 3 and parts[2].lower() not in ("none", "null", ""):
                     parsed_listing_id = parts[2]
@@ -3363,22 +3365,27 @@ class EquipmentRentalHandler:
         effective_uid = update.effective_user.id if update.effective_user else 0
         user_lang = await self._resolve_user_language_db_first(effective_uid, context)
 
+        udata_ctx = context.user_data if isinstance(context.user_data, dict) else {}
         active_deal_id = str(
-            context.user_data.get("active_equipment_deal_id", "pending")
+            udata_ctx.get("active_equipment_deal_id") or parsed_id or "pending"
         ).strip()
+
         listing_id: Optional[str] = (
                 parsed_listing_id
-                or context.user_data.get("active_equipment_listing_id")
+                or udata_ctx.get("active_equipment_listing_id")
+                or udata_ctx.get("last_created_listing_id")
+                or udata_ctx.get("selected_equipment_id")
         )
         request_id: Optional[str] = (
                 parsed_request_id
-                or context.user_data.get("active_equipment_request_id")
+                or udata_ctx.get("active_equipment_request_id")
+                or udata_ctx.get("request_id")
         )
 
         # ========================================================================
         # SINGLE SOURCE OF TRUTH: Initialize variables strictly from DB / context
         # ========================================================================
-        is_reverse = False
+        is_reverse = bool(udata_ctx.get("is_reverse_match", False))
         asking_price: float = 0.0
         deal_currency: Optional[str] = None
         listing_currency: Optional[str] = None
@@ -3392,6 +3399,7 @@ class EquipmentRentalHandler:
         req_eq: Optional[str] = None
         list_eq: Optional[str] = None
         seeker_id_from_deal: Optional[int] = None
+        provider_id_from_deal: Optional[int] = None
         vertical_from_deal: str = "equipment"
 
         def clean_text(val: Any) -> Optional[str]:
@@ -3431,10 +3439,11 @@ class EquipmentRentalHandler:
                     )
                     ddata = getattr(deal_res, "data", None) if deal_res else None
                     if isinstance(ddata, dict) and ddata:
-                        if safe_int(ddata.get("seeker_id")) == effective_uid and effective_uid:
+                        seeker_id_from_deal = safe_int(ddata.get("seeker_id")) or None
+                        provider_id_from_deal = safe_int(ddata.get("provider_id")) or None
+                        if seeker_id_from_deal == effective_uid and effective_uid:
                             is_reverse = True
 
-                        seeker_id_from_deal = safe_int(ddata.get("seeker_id")) or None
                         vertical_from_deal = clean_text(ddata.get("vertical_type")) or "equipment"
                         listing_id = clean_text(ddata.get("listing_id")) or listing_id
                         request_id = clean_text(ddata.get("request_id")) or request_id
@@ -3454,63 +3463,110 @@ class EquipmentRentalHandler:
                         f"Could not fetch deal '{active_deal_id}' in prompt_custom_offer: {d_err}"
                     )
 
-            # 2. Fetch from `provider_listings` using exact schema columns
-            if listing_id:
+            # Fallback if parsed_id was a listing_id or request_id rather than a deals.id
+            if not listing_id and not request_id and parsed_id:
                 try:
+                    chk_list = (
+                        await db_client.table("provider_listings")
+                        .select("id")
+                        .eq("id", parsed_id)
+                        .maybe_single()
+                        .execute()
+                    )
+                    if getattr(chk_list, "data", None):
+                        listing_id = parsed_id
+                    else:
+                        chk_req = (
+                            await db_client.table("seeker_requests")
+                            .select("id")
+                            .eq("id", parsed_id)
+                            .maybe_single()
+                            .execute()
+                        )
+                        if getattr(chk_req, "data", None):
+                            request_id = parsed_id
+                except Exception:
+                    pass
+
+            # 2. Fetch from `provider_listings` using exact schema columns
+            try:
+                ldata = None
+                if listing_id:
                     listing_res = (
                         await db_client.table("provider_listings")
                         .select(
-                            "id, price, currency, location_text, location, operating_region, "
-                            "destination_text, property_use, brand, make_model_year, "
-                            "vehicle_type, equipment_type, capacity_output"
+                            "id, provider_id, vertical_type, price, currency, location_text, "
+                            "location, operating_region, destination_text, property_use, "
+                            "brand, make_model_year, vehicle_type, equipment_type, capacity_output"
                         )
                         .eq("id", listing_id)
                         .maybe_single()
                         .execute()
                     )
                     ldata = getattr(listing_res, "data", None) if listing_res else None
-                    if isinstance(ldata, dict) and ldata:
-                        prop_loc_candidate = (
-                                clean_text(ldata.get("location_text"))
-                                or clean_text(ldata.get("location"))
-                                or clean_text(ldata.get("operating_region"))
-                                or clean_text(ldata.get("destination_text"))
+                elif provider_id_from_deal:
+                    latest_list_res = (
+                        await db_client.table("provider_listings")
+                        .select(
+                            "id, provider_id, vertical_type, price, currency, location_text, "
+                            "location, operating_region, destination_text, property_use, "
+                            "brand, make_model_year, vehicle_type, equipment_type, capacity_output"
                         )
-                        if prop_loc_candidate:
-                            fetched_prop_loc = prop_loc_candidate
-
-                        listing_price = safe_float(ldata.get("price"), 0.0)
-                        has_valid_listing_price = listing_price > 0
-                        if asking_price <= 0 and has_valid_listing_price:
-                            asking_price = listing_price
-
-                        listing_currency = clean_currency(ldata.get("currency"))
-
-                        listing_equip = (
-                                clean_text(ldata.get("equipment_type"))
-                                or clean_text(ldata.get("make_model_year"))
-                                or clean_text(ldata.get("vehicle_type"))
-                        )
-                        generic_categories = {
-                            "construction & earthmoving",
-                            "agriculture & irrigation",
-                            "generators & power",
-                            "event tech & commercial",
-                            "residential",
-                            "commercial",
-                        }
-                        if listing_equip and listing_equip.lower() not in generic_categories:
-                            list_eq = listing_equip
-                            model_name = listing_equip
-
-                        brand_name = clean_text(ldata.get("brand")) or brand_name
-                        if ldata.get("capacity_output") is not None:
-                            raw_cap_val = ldata.get("capacity_output")
-                        property_use = clean_text(ldata.get("property_use")) or property_use
-                except Exception as l_err:
-                    logger.warning(
-                        f"Could not fetch provider_listing '{listing_id}' in prompt_custom_offer: {l_err}"
+                        .eq("provider_id", provider_id_from_deal)
+                        .eq("vertical_type", vertical_from_deal)
+                        .order("created_at", desc=True)
+                        .limit(1)
+                        .execute()
                     )
+                    lrows = getattr(latest_list_res, "data", None) if latest_list_res else None
+                    if isinstance(lrows, list) and lrows:
+                        ldata = lrows[0]
+
+                if isinstance(ldata, dict) and ldata:
+                    prop_loc_candidate = (
+                            clean_text(ldata.get("location_text"))
+                            or clean_text(ldata.get("location"))
+                            or clean_text(ldata.get("operating_region"))
+                            or clean_text(ldata.get("destination_text"))
+                    )
+                    if prop_loc_candidate:
+                        fetched_prop_loc = prop_loc_candidate
+
+                    listing_price = safe_float(ldata.get("price"), 0.0)
+                    needs_asking_price = asking_price <= 0
+                    has_listing_price = listing_price > 0
+                    if needs_asking_price and has_listing_price:
+                        asking_price = listing_price
+
+                    listing_currency = clean_currency(ldata.get("currency"))
+
+                    listing_equip = (
+                            clean_text(ldata.get("equipment_type"))
+                            or clean_text(ldata.get("make_model_year"))
+                            or clean_text(ldata.get("vehicle_type"))
+                    )
+                    generic_categories = {
+                        "construction & earthmoving",
+                        "agriculture & irrigation",
+                        "generators & power",
+                        "event tech & commercial",
+                        "residential",
+                        "commercial",
+                    }
+                    if listing_equip and listing_equip.lower() not in generic_categories:
+                        list_eq = listing_equip
+                        model_name = listing_equip
+                    elif not model_name and clean_text(ldata.get("property_use")):
+                        model_name = clean_text(ldata.get("property_use"))
+
+                    brand_name = clean_text(ldata.get("brand")) or brand_name
+                    if ldata.get("capacity_output") is not None:
+                        raw_cap_val = ldata.get("capacity_output")
+                    property_use = clean_text(ldata.get("property_use")) or property_use
+            except Exception as l_err:
+                logger.warning(
+                    f"Could not fetch provider_listing '{listing_id}' in prompt_custom_offer: {l_err}"
+                )
 
             # 3. Fetch from `seeker_requests` using exact schema columns (with seeker_id fallback)
             try:
@@ -3579,25 +3635,36 @@ class EquipmentRentalHandler:
                     f"Could not fetch seeker_request in prompt_custom_offer: {r_err}"
                 )
 
-        # Resolve currency reliably: prefer explicit USD from listing/request/deal/context
-        context_currency = (
-            clean_currency(context.user_data.get("currency"))
-            if isinstance(context.user_data, dict)
-            else None
-        )
-        candidate_currencies = [c for c in [listing_currency, request_currency, deal_currency, context_currency] if c]
+        # Fallback assignments from session user_data if DB fields are absent
+        if not fetched_req_loc and udata_ctx:
+            fetched_req_loc = (
+                    clean_text(udata_ctx.get("request_location_text"))
+                    or clean_text(udata_ctx.get("seeker_location"))
+            )
+        if not fetched_prop_loc and udata_ctx:
+            fetched_prop_loc = (
+                    clean_text(udata_ctx.get("listing_location_text"))
+                    or clean_text(udata_ctx.get("location_text"))
+            )
+        if asking_price <= 0 and udata_ctx:
+            asking_price = safe_float(
+                udata_ctx.get("listing_asking_rate")
+                or udata_ctx.get("equipment_price")
+                or udata_ctx.get("asking_price")
+                or udata_ctx.get("current_price"),
+                0.0,
+            )
+
+        context_currency = clean_currency(udata_ctx.get("currency")) if udata_ctx else None
+        candidate_currencies = [
+            c for c in [listing_currency, request_currency, deal_currency, context_currency] if c
+        ]
         if "USD" in candidate_currencies:
             resolved_currency = "USD"
         elif candidate_currencies:
             resolved_currency = candidate_currencies[0]
         else:
             resolved_currency = "ETB"
-
-        if asking_price <= 0 and isinstance(context.user_data, dict):
-            asking_price = safe_float(
-                context.user_data.get("asking_price") or context.user_data.get("current_price"),
-                0.0,
-            )
 
         req_loc = fetched_req_loc or "Not Specified"
         prop_loc = fetched_prop_loc or "Not Specified"

@@ -1436,6 +1436,7 @@ class DatabaseManager:
             return None
 
         history = negotiation_history if negotiation_history is not None else []
+        now_iso = datetime.now(timezone.utc).isoformat()
 
         # 1. Resolve request_id, handling alternative or legacy keyword arguments gracefully
         resolved_request_id = (
@@ -1449,30 +1450,48 @@ class DatabaseManager:
         else:
             # 🛡️ FOREIGN KEY GUARD: Ensure request_id actually exists in seeker_requests table
             try:
-                req_check = await self.supabase.table('seeker_requests').select('id').eq('id',
-                                                                                         str(resolved_request_id)).maybe_single().execute()
+                req_check = (
+                    await self.supabase.table("seeker_requests")
+                    .select("id")
+                    .eq("id", str(resolved_request_id))
+                    .maybe_single()
+                    .execute()
+                )
                 if not req_check or not req_check.data:
                     # Check if the passed ID is actually an existing Deal ID
-                    deal_req_lookup = await self.supabase.table('deals').select('request_id, listing_id').eq('id',
-                                                                                                             str(resolved_request_id)).maybe_single().execute()
+                    deal_req_lookup = (
+                        await self.supabase.table("deals")
+                        .select("request_id, listing_id")
+                        .eq("id", str(resolved_request_id))
+                        .maybe_single()
+                        .execute()
+                    )
                     if deal_req_lookup and deal_req_lookup.data:
-                        resolved_request_id = deal_req_lookup.data.get('request_id')
-                        if not listing_id and deal_req_lookup.data.get('listing_id'):
-                            listing_id = deal_req_lookup.data.get('listing_id')
-                        logger.info(f"🛡️ Guard successfully resolved actual seeker request_id from passed Deal ID.")
+                        resolved_request_id = deal_req_lookup.data.get("request_id")
+                        if not listing_id and deal_req_lookup.data.get("listing_id"):
+                            listing_id = deal_req_lookup.data.get("listing_id")
+                        logger.info(
+                            "🛡️ Guard successfully resolved actual seeker request_id from passed Deal ID."
+                        )
                     else:
                         logger.warning(
-                            f"⚠️ ID '{resolved_request_id}' is not a valid seeker_request. Setting request_id to None to prevent FK crash.")
+                            f"⚠️ ID '{resolved_request_id}' is not a valid seeker_request. "
+                            "Setting request_id to None to prevent FK crash."
+                        )
                         resolved_request_id = None
             except Exception as fk_guard_err:
                 logger.warning(f"Request ID validation guard warning: {fk_guard_err}")
                 resolved_request_id = None
 
-        resolved_listing_id = listing_id if listing_id not in ("None", "none", "", None) else None
+        resolved_listing_id = str(listing_id).strip() if listing_id not in ("None", "none", "", None) else None
+        if resolved_request_id is not None:
+            resolved_request_id = str(resolved_request_id).strip()
 
         # Strict Platform Verticals Validation & Lockdown
         ALLOWED_VERTICALS = {"housing", "vehicle", "equipment", "freight", "ride"}
-        raw_vertical = str(vertical_type or kwargs.get('domain') or kwargs.get('vertical') or "housing").lower().strip()
+        raw_vertical = str(
+            vertical_type or kwargs.get("domain") or kwargs.get("vertical") or "housing"
+        ).lower().strip()
         if raw_vertical not in ALLOWED_VERTICALS:
             logger.warning(f"⚠️ Invalid or unmapped vertical '{raw_vertical}' detected. Defaulting to 'housing'.")
             vertical_type = "housing"
@@ -1480,89 +1499,122 @@ class DatabaseManager:
             vertical_type = raw_vertical
 
         authoritative_vertical = vertical_type
-        authoritative_currency = kwargs.get("currency", "ETB")
+        authoritative_currency = str(kwargs.get("currency") or "ETB").upper().strip()
 
         # 2. SINGLE SOURCE OF TRUTH ENFORCEMENT & CURRENCY/VERTICAL LOCKDOWN
         try:
             if resolved_listing_id:
-                listing_check = await self.supabase.table("provider_listings").select("*").eq("id",
-                                                                                              resolved_listing_id).maybe_single().execute()
+                listing_check = (
+                    await self.supabase.table("provider_listings")
+                    .select("*")
+                    .eq("id", resolved_listing_id)
+                    .maybe_single()
+                    .execute()
+                )
                 if listing_check and listing_check.data:
                     listing_data = listing_check.data
-                    provider_id = int(listing_data.get('provider_id', provider_id))
-                    auth_v = str(listing_data.get('vertical_type', vertical_type)).lower().strip()
+                    provider_id = int(listing_data.get("provider_id", provider_id))
+                    auth_v = str(listing_data.get("vertical_type", vertical_type)).lower().strip()
                     if auth_v in ALLOWED_VERTICALS:
                         authoritative_vertical = auth_v
-                    authoritative_currency = str(listing_data.get('currency', authoritative_currency)).upper().strip()
+                    if listing_data.get("currency"):
+                        authoritative_currency = str(listing_data.get("currency")).upper().strip()
                     if not asset_title:
-                        asset_title = listing_data.get('vehicle_type') or listing_data.get(
-                            'equipment_type') or listing_data.get('property_use') or listing_data.get('title')
+                        asset_title = (
+                                listing_data.get("equipment_type")
+                                or listing_data.get("vehicle_type")
+                                or listing_data.get("property_use")
+                                or listing_data.get("make_model_year")
+                        )
 
             if resolved_request_id:
-                req_check = await self.supabase.table("seeker_requests").select("*").eq("id",
-                                                                                        resolved_request_id).maybe_single().execute()
+                req_check = (
+                    await self.supabase.table("seeker_requests")
+                    .select("*")
+                    .eq("id", resolved_request_id)
+                    .maybe_single()
+                    .execute()
+                )
                 if req_check and req_check.data:
                     req_data = req_check.data
-                    seeker_id = int(req_data.get('seeker_id', seeker_id))
-                    auth_v = str(req_data.get('vertical_type', authoritative_vertical)).lower().strip()
+                    seeker_id = int(req_data.get("seeker_id", seeker_id))
+                    auth_v = str(req_data.get("vertical_type", authoritative_vertical)).lower().strip()
                     if auth_v in ALLOWED_VERTICALS:
                         authoritative_vertical = auth_v
-                    authoritative_currency = str(req_data.get('currency', authoritative_currency)).upper().strip()
+                    if req_data.get("currency"):
+                        authoritative_currency = str(req_data.get("currency")).upper().strip()
                     if not asset_title:
-                        asset_title = req_data.get('property_use') or req_data.get('vehicle_type') or req_data.get(
-                            'equipment_type')
+                        asset_title = (
+                                req_data.get("equipment_type")
+                                or req_data.get("property_use")
+                                or req_data.get("vehicle_type")
+                                or req_data.get("make_model_year")
+                        )
         except Exception as truth_err:
-            logger.warning(f"Database single source of truth lookup warning in create_pending_deal: {truth_err}")
+            logger.warning(
+                f"Database single source of truth lookup warning in create_pending_deal: {truth_err}"
+            )
 
         # 3. ROBUST RESUMPTION PRE-CHECK: Prevent creating new deal if an active/interrupted one exists
         try:
             existing_query = (
-                self.supabase.table('deals')
-                .select('*')
-                .eq('seeker_id', seeker_id)
-                .eq('provider_id', provider_id)
+                self.supabase.table("deals")
+                .select("*")
+                .eq("seeker_id", int(seeker_id))
+                .eq("provider_id", int(provider_id))
             )
             if resolved_listing_id:
-                existing_query = existing_query.eq('listing_id', resolved_listing_id)
+                existing_query = existing_query.eq("listing_id", resolved_listing_id)
             elif resolved_request_id:
-                existing_query = existing_query.eq('request_id', resolved_request_id)
+                existing_query = existing_query.eq("request_id", resolved_request_id)
 
-            existing_res = await existing_query.order('created_at', desc=True).limit(1).maybe_single().execute()
+            existing_res = (
+                await existing_query.order("created_at", desc=True).limit(1).maybe_single().execute()
+            )
             if existing_res and existing_res.data:
                 existing_deal = existing_res.data
-                deal_state_val = str(existing_deal.get('deal_state', '')).lower().strip()
-                deal_status_val = str(existing_deal.get('status', '')).lower().strip()
-                payment_status_val = str(existing_deal.get('payment_status', '')).lower().strip()
+                deal_state_val = str(existing_deal.get("deal_state", "")).lower().strip()
+                deal_status_val = str(existing_deal.get("status", "")).lower().strip()
+                payment_status_val = str(existing_deal.get("payment_status", "")).lower().strip()
 
                 is_locked = (
-                        deal_state_val in ['finalized', 'completed', 'paid', 'locked']
-                        or deal_status_val in ['finalized', 'completed', 'paid', 'locked']
-                        or payment_status_val in ['paid', 'completed']
+                        deal_state_val in ["finalized", "completed", "paid", "locked"]
+                        or deal_status_val in ["finalized", "completed", "paid", "locked"]
+                        or payment_status_val in ["paid", "completed"]
                 )
 
                 if not is_locked:
-                    deal_id = existing_deal.get('id')
+                    deal_id = existing_deal.get("id")
+                    effective_price = float(
+                        current_price
+                        if float(current_price or 0.0) > 0
+                        else (existing_deal.get("current_price") or existing_deal.get("agreed_price") or 0.0)
+                    )
                     update_payload = {
-                        "current_price": float(current_price or existing_deal.get('current_price', 0.0)),
-                        "agreed_price": float(current_price or existing_deal.get('agreed_price', 0.0)),
+                        "current_price": effective_price,
+                        "agreed_price": effective_price,
                         "vertical_type": authoritative_vertical,
                         "currency": authoritative_currency,
                         "deal_state": deal_state,
-                        "updated_at": datetime.utcnow().isoformat()
+                        "updated_at": now_iso,
                     }
                     if asset_title:
                         update_payload["asset_title"] = asset_title
                     if resolved_request_id:
                         update_payload["request_id"] = resolved_request_id
+                    if resolved_listing_id:
+                        update_payload["listing_id"] = resolved_listing_id
 
-                    await self.supabase.table('deals').update(update_payload).eq('id', deal_id).execute()
+                    await self.supabase.table("deals").update(update_payload).eq("id", deal_id).execute()
                     logger.info(
-                        f"🔄 Resumed interrupted active deal session {deal_id} for Seeker {seeker_id} <-> Provider {provider_id}.")
+                        f"🔄 Resumed interrupted active deal session {deal_id} "
+                        f"for Seeker {seeker_id} <-> Provider {provider_id}."
+                    )
                     return deal_id
         except Exception as resumption_err:
             logger.debug(f"Resumption pre-check lookup failed or skipped: {resumption_err}")
 
-        # 4. Dynamic Payload Construction (Aligned with database schema tables)
+        # 4. Dynamic Payload Construction (Aligned with `deals` schema columns)
         deal_id = str(uuid.uuid4())
         payload = {
             "id": deal_id,
@@ -1579,30 +1631,57 @@ class DatabaseManager:
             "negotiation_history": history,
             "asset_title": asset_title or "Matched Asset Listing",
             "weight": float(weight),
-            "created_at": datetime.utcnow().isoformat(),
-            "updated_at": datetime.utcnow().isoformat()
+            "created_at": now_iso,
+            "updated_at": now_iso,
         }
 
+        allowed_extra_cols = {
+            "match_proposal_id",
+            "payment_status",
+            "dispatch_sent",
+            "seeker_phone",
+            "provider_phone",
+            "origin",
+            "destination",
+            "cargo_weight_kgs",
+            "plate_number",
+            "requested_quantity",
+            "payment_reference",
+            "party_size",
+            "payment_initiated",
+            "reservation_status",
+            "transaction_type",
+            "accepted_by",
+            "transit_duration_minutes",
+        }
         for k, v in kwargs.items():
-            if k not in payload and k not in ["seeker_request_id", "currency", "domain", "vertical"]:
+            if k in allowed_extra_cols and k not in payload and v is not None:
                 payload[k] = v
 
         try:
-            await self.supabase.table('deals').insert(payload).execute()
+            await self.supabase.table("deals").insert(payload).execute()
             logger.info(
-                f"🎯 Successfully created new deal {deal_id} for Seeker {seeker_id} <-> Provider {provider_id} (Request ID: {resolved_request_id})")
+                f"🎯 Successfully created new deal {deal_id} for Seeker {seeker_id} <-> Provider {provider_id} "
+                f"(Request ID: {resolved_request_id})"
+            )
             return deal_id
         except Exception as e:
             if "unique_active_asset_deal" in str(e) or "23505" in str(e):
-                logger.warning(f"⚠️ Concurrent insertion conflict. Retrieving existing deal...")
+                logger.warning("⚠️ Concurrent insertion conflict. Retrieving existing deal...")
                 try:
-                    fallback_query = self.supabase.table('deals').select('id').eq('seeker_id', seeker_id).eq(
-                        'provider_id', provider_id)
+                    fallback_query = (
+                        self.supabase.table("deals")
+                        .select("id")
+                        .eq("seeker_id", int(seeker_id))
+                        .eq("provider_id", int(provider_id))
+                    )
                     if resolved_listing_id:
-                        fallback_query = fallback_query.eq('listing_id', resolved_listing_id)
-                    fallback_res = await fallback_query.order('created_at', desc=True).limit(1).maybe_single().execute()
+                        fallback_query = fallback_query.eq("listing_id", resolved_listing_id)
+                    fallback_res = (
+                        await fallback_query.order("created_at", desc=True).limit(1).maybe_single().execute()
+                    )
                     if fallback_res and fallback_res.data:
-                        return fallback_res.data.get('id')
+                        return fallback_res.data.get("id")
                 except Exception as lookup_err:
                     logger.error(f"Failed fallback lookup during insertion conflict: {lookup_err}")
                 return None
@@ -1616,28 +1695,18 @@ class DatabaseManager:
         Safely returns the deal dictionary if found, or None if invalid, missing, or errored.
         Robustly handles both list and single-object response formats from Supabase.
         """
-        # 1. Guard against empty inputs, invalid string representations, or uninitialized DB client
         if not deal_id or deal_id == "None" or not self.supabase:
             return None
 
         try:
-            # 2. Execute query safely using standard execution
-            response = await self.supabase.table('deals').select('*').eq('id', deal_id).execute()
-
-            # 3. Verify response contains data and safely extract the dictionary record
-            if response and hasattr(response, 'data') and response.data:
+            response = await self.supabase.table("deals").select("*").eq("id", str(deal_id)).execute()
+            if response and hasattr(response, "data") and response.data:
                 data = response.data
-
-                # If Supabase returns a list of records
                 if isinstance(data, list):
                     return data[0] if len(data) > 0 else None
-
-                # If Supabase returns a single dictionary object directly
                 elif isinstance(data, dict):
                     return data
-
             return None
-
         except Exception as e:
             logger.error(f"Error retrieving deal record for ID '{deal_id}': {str(e)}")
             return None
@@ -1645,11 +1714,16 @@ class DatabaseManager:
     async def update_deal_price(self, deal_id: str, new_price: float) -> bool:
         if not self.supabase:
             return False
-        response = await self.supabase.table('deals').update({
-            "current_price": float(new_price),
-            "updated_at": datetime.utcnow().isoformat()
-        }).eq('id', deal_id).execute()
-        return len(response.data) > 0
+        response = (
+            await self.supabase.table("deals")
+            .update({
+                "current_price": float(new_price),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            })
+            .eq("id", str(deal_id))
+            .execute()
+        )
+        return bool(response and getattr(response, "data", None))
 
     async def sync_listing_status_for_deal(self, deal_id: str, deal_record: dict = None) -> None:
         """
@@ -1657,156 +1731,203 @@ class DatabaseManager:
         are updated correctly upon deal finalization across all vertical types with
         multi-tier smart fallbacks and time-based logistics reservation windows.
         """
+        if not self.supabase:
+            logger.error("❌ Supabase client unavailable in sync_listing_status_for_deal.")
+            return
+
         try:
-            now_iso = datetime.now(timezone.utc).isoformat()
+            now_dt = datetime.now(timezone.utc)
+            now_iso = now_dt.isoformat()
 
             # 1. Fetch deal record if not provided
-            if not deal_record:
-                res = await self.supabase.table('deals').select('*').eq('id', deal_id).execute()
-                if res and hasattr(res, 'data') and res.data:
+            if not isinstance(deal_record, dict) or not deal_record:
+                res = await self.supabase.table("deals").select("*").eq("id", str(deal_id)).execute()
+                if res and getattr(res, "data", None):
                     deal_record = res.data[0]
                 else:
-                    logger.warning(f"⚠️ Could not fetch deal record for ID {deal_id} during status synchronization.")
+                    logger.warning(
+                        f"⚠️ Could not fetch deal record for ID {deal_id} during status synchronization.")
                     return
 
-            listing_id = deal_record.get('listing_id')
-            request_id = deal_record.get('request_id') or deal_record.get('seeker_request_id')
-            seeker_id = deal_record.get('seeker_id')
-            vertical = str(deal_record.get('vertical_type') or '').lower().strip()
+            listing_id = deal_record.get("listing_id")
+            request_id = deal_record.get("request_id")
+            seeker_id = deal_record.get("seeker_id")
+            vertical = str(deal_record.get("vertical_type") or "").lower().strip()
 
             # 2. Sync Provider Listing Status based on Vertical Type
             if listing_id:
+                listing_id_str = str(listing_id).strip()
                 if not vertical:
-                    listing_res = await self.supabase.table('provider_listings').select('vertical_type').eq('id',
-                                                                                                            listing_id).execute()
-                    if listing_res and hasattr(listing_res, 'data') and listing_res.data:
-                        vertical = str(listing_res.data[0].get('vertical_type', '')).lower().strip()
+                    listing_res = (
+                        await self.supabase.table("provider_listings")
+                        .select("vertical_type")
+                        .eq("id", listing_id_str)
+                        .execute()
+                    )
+                    if listing_res and getattr(listing_res, "data", None):
+                        vertical = str(listing_res.data[0].get("vertical_type", "")).lower().strip()
 
-                FIXED_ASSET_VERTICALS = {'housing', 'house', 'vehicle', 'vehicles', 'equipment', 'equipment_rental'}
-                LOGISTICS_VERTICALS = {'ride', 'freight', 'cargo', 'transport'}
+                FIXED_ASSET_VERTICALS = {"housing", "house", "vehicle", "vehicles", "equipment", "equipment_rental"}
+                LOGISTICS_VERTICALS = {"ride", "freight", "cargo", "transport"}
 
                 if any(v in vertical for v in FIXED_ASSET_VERTICALS):
-                    # Fixed assets are permanently finalized upon deal completion
-                    await self.supabase.table('provider_listings').update({
-                        'status': 'finalized',
-                        'availability_status': 'reserved',
-                        'updated_at': now_iso
-                    }).eq('id', listing_id).execute()
-                    logger.info(f"✅ Provider listing {listing_id} (Fixed Asset) updated to 'finalized'.")
+                    # Fixed assets finalize upon deal completion
+                    await (
+                        self.supabase.table("provider_listings")
+                        .update({
+                            "status": "finalized",
+                            "availability_status": "reserved",
+                            "updated_at": now_iso,
+                        })
+                        .eq("id", listing_id_str)
+                        .execute()
+                    )
+                    logger.info(f"✅ Provider listing {listing_id_str} (Fixed Asset) updated to 'finalized'.")
                 elif any(v in vertical for v in LOGISTICS_VERTICALS):
-                    # Ride & Freight services remain active after fulfillment, but are temporarily 'reserved'
-                    # Calculate ETA + delivery duration (defaulting to 120 mins or using deal transit duration)
-                    transit_mins = int(deal_record.get('transit_duration_minutes') or 120)
-                    reserved_until = (datetime.now(timezone.utc) + timedelta(minutes=transit_mins)).isoformat()
+                    # Ride & Freight services move to 'reserved' with a time-based reservation window
+                    transit_mins = int(deal_record.get("transit_duration_minutes") or 120)
+                    reserved_until = (now_dt + timedelta(minutes=transit_mins)).isoformat()
 
-                    await self.supabase.table('provider_listings').update({
-                        'status': 'reserved',
-                        'reserved_until': reserved_until,
-                        'updated_at': now_iso
-                    }).eq('id', listing_id).execute()
+                    await (
+                        self.supabase.table("provider_listings")
+                        .update({
+                            "status": "reserved",
+                            "reserved_until": reserved_until,
+                            "updated_at": now_iso,
+                        })
+                        .eq("id", listing_id_str)
+                        .execute()
+                    )
                     logger.info(
-                        f"✅ Provider listing {listing_id} (Logistics) updated to 'reserved' until {reserved_until}.")
+                        f"✅ Provider listing {listing_id_str} (Logistics) updated to 'reserved' until {reserved_until}."
+                    )
                 else:
-                    logger.info(f"ℹ️ Dynamic/Uncategorized service listing {listing_id} retained/processed.")
+                    await (
+                        self.supabase.table("provider_listings")
+                        .update({
+                            "status": "reserved",
+                            "availability_status": "reserved",
+                            "updated_at": now_iso,
+                        })
+                        .eq("id", listing_id_str)
+                        .execute()
+                    )
+                    logger.info(f"ℹ️ Listing {listing_id_str} ({vertical or 'general'}) updated to 'reserved'.")
 
             # 3. Multi-Tier Smart Fallback for Seeker Request Resolution
-            if not request_id and seeker_id:
+            resolved_request_ids: List[str] = []
+            if request_id not in (None, "", "None", "none"):
+                resolved_request_ids.append(str(request_id).strip())
+
+            if seeker_id is not None:
                 try:
-                    # Tier A: Try finding any active/pending/negotiating request for this seeker and vertical
-                    query = self.supabase.table('seeker_requests').select('id, status').eq('seeker_id', seeker_id)
+                    seeker_uid = int(seeker_id)
+                    query = (
+                        self.supabase.table("seeker_requests")
+                        .select("id, status, vertical_type")
+                        .eq("seeker_id", seeker_uid)
+                    )
                     if vertical:
-                        query = query.eq('vertical_type', vertical)
+                        query = query.eq("vertical_type", vertical)
 
-                    req_res = await query.order('created_at', desc=True).limit(5).execute()
+                    req_res = await query.order("created_at", desc=True).limit(10).execute()
+                    rows = getattr(req_res, "data", None) if req_res else None
+                    if isinstance(rows, list) and rows:
+                        active_ids = [
+                            str(r.get("id")).strip()
+                            for r in rows
+                            if str(r.get("status") or "").lower().strip() in {"active", "pending", "negotiating"}
+                               and r.get("id")
+                        ]
+                        for rid in active_ids:
+                            if rid not in resolved_request_ids:
+                                resolved_request_ids.append(rid)
 
-                    if req_res and req_res.data:
-                        active_reqs = [r for r in req_res.data if
-                                       r.get('status') in ['active', 'pending', 'negotiating']]
-                        target_req = active_reqs[0] if active_reqs else req_res.data[0]
-                        request_id = target_req.get('id')
+                        if not resolved_request_ids and rows[0].get("id"):
+                            resolved_request_ids.append(str(rows[0].get("id")).strip())
 
+                    # Back-populate deals.request_id if it was missing
+                    if not request_id and resolved_request_ids:
+                        await (
+                            self.supabase.table("deals")
+                            .update({"request_id": resolved_request_ids[0], "updated_at": now_iso})
+                            .eq("id", str(deal_id))
+                            .execute()
+                        )
                         logger.info(
-                            f"💡 Smart resolved seeker request ID {request_id} for deal {deal_id} (vertical: {vertical})")
-
-                        # Back-populate the deal record for future reference
-                        await self.supabase.table('deals').update({'request_id': request_id}).eq('id',
-                                                                                                 deal_id).execute()
+                            f"💡 Back-populated deals.request_id={resolved_request_ids[0]} for deal {deal_id}."
+                        )
                 except Exception as fb_err:
                     logger.warning(f"Smart fallback seeker request lookup failed for deal {deal_id}: {fb_err}")
 
-            # Tier B Absolute Fallback: If still missing, query the absolute latest request by seeker_id
-            if not request_id and seeker_id:
-                try:
-                    last_res = await self.supabase.table('seeker_requests').select('id') \
-                        .eq('seeker_id', seeker_id) \
-                        .order('created_at', desc=True) \
-                        .limit(1) \
+            # 4. Sync Seeker Request Status to 'finalized' to prevent re-matching
+            if resolved_request_ids:
+                for rid in resolved_request_ids:
+                    await (
+                        self.supabase.table("seeker_requests")
+                        .update({
+                            "status": "finalized",
+                            "updated_at": now_iso,
+                        })
+                        .eq("id", rid)
                         .execute()
-                    if last_res and last_res.data:
-                        request_id = last_res.data[0].get('id')
-                        logger.info(
-                            f"💡 Absolute fallback resolved seeker request ID {request_id} for seeker {seeker_id}")
-                except Exception as abs_err:
-                    logger.error(f"Absolute fallback failed: {abs_err}")
-
-            # 4. Sync Seeker Request Status to 'finalized' with Guaranteed Execution Logging
-            if request_id:
-                update_res = await self.supabase.table('seeker_requests').update({
-                    'status': 'finalized',
-                    'updated_at': now_iso
-                }).eq('id', request_id).execute()
-
-                if update_res and getattr(update_res, 'data', None):
-                    logger.info(
-                        f"✅ Seeker request {request_id} status successfully updated from 'active' to 'finalized'.")
-                else:
-                    logger.warning(
-                        f"⚠️ Seeker request {request_id} update executed, but no matching record returned data.")
+                    )
+                    logger.info(f"✅ Seeker request {rid} status updated to 'finalized'.")
             else:
-                logger.error(
-                    f"❌ CRITICAL: Could not resolve any seeker request for deal {deal_id} (Seeker ID: {seeker_id}).")
+                logger.warning(
+                    f"⚠️ Could not resolve any seeker request for deal {deal_id} (Seeker ID: {seeker_id})."
+                )
 
         except Exception as sync_err:
-            logger.error(f"Failed to sync provider listing & seeker request status for deal '{deal_id}': {sync_err}",
-                         exc_info=True)
+            logger.error(
+                f"Failed to sync provider listing & seeker request status for deal '{deal_id}': {sync_err}",
+                exc_info=True,
+            )
 
     async def update_deal_status(self, deal_id: str, status: str) -> bool:
         """
-        Updates the deal status/state and timestamp.
-        Conditionally syncs provider_listings status if status is 'finalized'.
+        Updates both `status` and `deal_state` on `deals` and triggers
+        `sync_listing_status_for_deal` when a deal reaches a finalized/completed/paid state.
         Returns True if successful, False otherwise.
         """
-        # Guard against uninitialized client or invalid IDs
         if not self.supabase or not deal_id or deal_id == "None":
             return False
 
         try:
-            # Force lowercase to match state definitions
-            safe_status = status.lower()
-            now_iso = datetime.utcnow().isoformat()
+            safe_status = str(status).lower().strip()
+            now_iso = datetime.now(timezone.utc).isoformat()
+            deal_id_str = str(deal_id).strip()
 
-            # 🛠️ CRITICAL FIX: Use "deal_state" instead of "status" to match database schema
-            response = await self.supabase.table('deals').update({
-                "deal_state": safe_status,
-                "updated_at": now_iso
-            }).eq('id', deal_id).execute()
+            response = (
+                await self.supabase.table("deals")
+                .update({
+                    "status": safe_status,
+                    "deal_state": safe_status,
+                    "updated_at": now_iso,
+                })
+                .eq("id", deal_id_str)
+                .execute()
+            )
 
-            # Safely evaluate response.data to prevent AttributeError crashes
-            success = False
             deal_record = None
-            if response and hasattr(response, 'data') and isinstance(response.data, list) and len(response.data) > 0:
+            success = False
+            if response and hasattr(response, "data") and isinstance(response.data, list) and len(
+                    response.data) > 0:
                 success = True
                 deal_record = response.data[0]
+            else:
+                # Fetch record to confirm existence and retrieve metadata even if update returned empty data
+                deal_record = await self.get_deal_by_id(deal_id_str)
+                if deal_record:
+                    success = True
 
-            # 🛠️ CASCADE LISTING STATUS UPDATE ON FINALIZED
-            if success and safe_status == 'finalized':
-                await self.sync_listing_status_for_deal(deal_id, deal_record)
+            if success and safe_status in {"finalized", "completed", "paid"}:
+                await self.sync_listing_status_for_deal(deal_id_str, deal_record)
 
             return success
 
         except Exception as e:
             logger.error(f"Failed to update deal '{deal_id}' to status '{status}': {str(e)}")
-            # Re-raise so the DealsHandler can catch it and show an error message to the user
             raise
 
     async def update_negotiation_state(
@@ -1818,42 +1939,57 @@ class DatabaseManager:
     ) -> bool:
         """
         Updates an active deal's state, current price, and negotiation history in Supabase.
-        Conditionally syncs provider_listings status if deal_state is 'finalized'.
+        Synchronizes `status` and `deal_state` and conditionally syncs provider_listings
+        and seeker_requests when finalized/completed/paid.
         Returns True on success, False on failure.
         """
-        if not self.supabase or not deal_id:
+        if not self.supabase or not deal_id or str(deal_id).strip() in ("", "None", "none"):
             return False
 
-        safe_state = str(deal_state).lower()
-        now_iso = datetime.utcnow().isoformat()
+        deal_id_str = str(deal_id).strip()
+        safe_state = str(deal_state).lower().strip()
+        now_iso = datetime.now(timezone.utc).isoformat()
 
-        payload = {
+        payload: Dict[str, Any] = {
             "deal_state": safe_state,
-            "updated_at": now_iso
+            "status": safe_state,
+            "updated_at": now_iso,
         }
 
         if current_price is not None:
-            payload["current_price"] = current_price
+            parsed_price = float(current_price)
+            payload["current_price"] = parsed_price
+            if safe_state in {"finalized", "completed", "paid", "accepted"}:
+                payload["agreed_price"] = parsed_price
 
         if negotiation_history is not None:
             payload["negotiation_history"] = negotiation_history
 
         try:
-            response = await self.supabase.table('deals').update(payload).eq('id', deal_id).execute()
+            response = (
+                await self.supabase.table("deals")
+                .update(payload)
+                .eq("id", deal_id_str)
+                .execute()
+            )
 
             success = False
             deal_record = None
-            if response and hasattr(response, 'data') and isinstance(response.data, list) and len(response.data) > 0:
+            if response and hasattr(response, "data") and isinstance(response.data, list) and len(response.data) > 0:
                 success = True
                 deal_record = response.data[0]
+            else:
+                deal_record = await self.get_deal_by_id(deal_id_str)
+                if deal_record:
+                    success = True
 
-            # 🛠️ CASCADE LISTING STATUS UPDATE ON FINALIZED
-            if success and safe_state == 'finalized':
-                await self.sync_listing_status_for_deal(deal_id, deal_record)
+            # 🛠️ CASCADE LISTING & REQUEST STATUS UPDATE ON FINALIZATION
+            if success and safe_state in {"finalized", "completed", "paid"}:
+                await self.sync_listing_status_for_deal(deal_id_str, deal_record)
 
             return success
         except Exception as e:
-            logger.error(f"Failed to update negotiation state for deal '{deal_id}': {str(e)}")
+            logger.error(f"Failed to update negotiation state for deal '{deal_id_str}': {str(e)}")
             return False
 
     # ==========================================
