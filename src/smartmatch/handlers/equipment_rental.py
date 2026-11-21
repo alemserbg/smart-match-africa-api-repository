@@ -195,6 +195,79 @@ class EquipmentRentalHandler:
         self.queue = queue_manager
         self.deals = deals_handler
 
+    async def record_counter_offer_to_deal(
+            self,
+            context: ContextTypes.DEFAULT_TYPE,
+            deal_id: str,
+            offer_price: float,
+            actor_id: int,
+            currency: str = "USD",
+    ) -> bool:
+        """
+        Persists a counter-offer (e.g., 75.0 USD) to `deals.current_price` and appends
+        it to `deals.negotiation_history` so deal acceptance always sees the latest rate.
+        """
+        db_client = getattr(self, "db", None) or getattr(getattr(self, "db_manager", None), "supabase", None)
+        if hasattr(db_client, "supabase") and not hasattr(db_client, "table"):
+            db_client = db_client.supabase
+
+        price_val = float(offer_price)
+        curr_code = str(currency or "USD").upper().strip()
+        now_dt = datetime.now(timezone.utc)
+        now_iso = now_dt.isoformat()
+
+        udata = context.user_data if isinstance(context.user_data, dict) else {}
+        udata["latest_counter_offer"] = price_val
+        udata["last_proposed_price"] = price_val
+        udata["current_price"] = price_val
+        udata["currency"] = curr_code
+
+        if not db_client or not hasattr(db_client, "table") or not deal_id:
+            return False
+
+        try:
+            existing_history: List[Dict[str, Any]] = []
+            res = (
+                await db_client.table("deals")
+                .select("negotiation_history, currency")
+                .eq("id", str(deal_id))
+                .maybe_single()
+                .execute()
+            )
+            row = getattr(res, "data", None) if res else None
+            if isinstance(row, dict):
+                if row.get("currency"):
+                    curr_code = str(row["currency"]).upper().strip()
+                raw_hist = row.get("negotiation_history")
+                if isinstance(raw_hist, str):
+                    raw_hist = json.loads(raw_hist)
+                if isinstance(raw_hist, list):
+                    existing_history = [item for item in raw_hist if isinstance(item, dict)]
+
+            existing_history.append({
+                "time": now_dt.strftime("%Y-%m-%d %H:%M:%S.%f"),
+                "actor": int(actor_id),
+                "offer": price_val,
+                "action": "counter_offer",
+                "currency": curr_code,
+            })
+
+            await (
+                db_client.table("deals")
+                .update({
+                    "current_price": price_val,
+                    "negotiation_history": existing_history,
+                    "updated_at": now_iso,
+                })
+                .eq("id", str(deal_id))
+                .execute()
+            )
+            udata["negotiation_history"] = existing_history
+            return True
+        except Exception as err:
+            logger.error(f"Failed to persist counter-offer {price_val} {curr_code} for deal {deal_id}: {err}")
+            return False
+
     async def finalize_accepted_counter_offer(
             self,
             update: Optional[Any] = None,
@@ -217,9 +290,11 @@ class EquipmentRentalHandler:
                 accepted_price = float(deal_id)
                 deal_id = None
 
+        actor_id = 0
         if update is not None and getattr(update, "effective_user", None):
+            actor_id = int(getattr(update.effective_user, "id", 0) or 0)
             logger.debug(
-                f"Finalizing accepted counter-offer triggered by user_id={update.effective_user.id}"
+                f"Finalizing accepted counter-offer triggered by user_id={actor_id}"
             )
 
         db_client = (
@@ -243,10 +318,6 @@ class EquipmentRentalHandler:
             or ""
         ).strip()
 
-        final_price: Optional[float] = None
-        if accepted_price is not None and float(accepted_price) > 0:
-            final_price = float(accepted_price)
-
         deal_row: Dict[str, Any] = {}
         if db_client and hasattr(db_client, "table") and resolved_deal_id:
             try:
@@ -264,33 +335,51 @@ class EquipmentRentalHandler:
             except Exception as fetch_err:
                 logger.warning(f"Could not fetch deal '{resolved_deal_id}' before finalizing offer: {fetch_err}")
 
-        if final_price is None:
-            raw_history = deal_row.get("negotiation_history") or udata.get("negotiation_history")
-            if isinstance(raw_history, str):
-                try:
-                    raw_history = json.loads(raw_history)
-                except Exception:
-                    raw_history = None
+        raw_history = deal_row.get("negotiation_history")
+        if raw_history is None:
+            raw_history = udata.get("negotiation_history")
+        if isinstance(raw_history, str):
+            try:
+                raw_history = json.loads(raw_history)
+            except Exception:
+                raw_history = None
+        history_list: List[Dict[str, Any]] = (
+            [dict(item) for item in raw_history if isinstance(item, dict)]
+            if isinstance(raw_history, list)
+            else []
+        )
 
-            if isinstance(raw_history, list) and raw_history:
-                for item in reversed(raw_history):
-                    if isinstance(item, dict):
-                        cand = (
-                            item.get("offer")
-                            if item.get("offer") is not None
-                            else (item.get("price") or item.get("offer_price") or item.get("amount"))
-                        )
-                        if cand is not None and float(cand) > 0:
-                            final_price = float(cand)
-                            break
+        # Priority order:
+        # 1. Explicit accepted_price
+        # 2. Latest offer in DB/context negotiation_history
+        # 3. Authoritative deals.current_price
+        # 4. Context offer/price fallbacks -> deals.agreed_price
+        final_price: Optional[float] = None
+        if accepted_price is not None and float(accepted_price) > 0:
+            final_price = float(accepted_price)
+
+        if final_price is None and history_list:
+            for item in reversed(history_list):
+                cand = (
+                    item.get("offer")
+                    if item.get("offer") is not None
+                    else (item.get("price") or item.get("offer_price") or item.get("amount"))
+                )
+                if cand is not None and float(cand) > 0:
+                    final_price = float(cand)
+                    break
+
+        if final_price is None and deal_row.get("current_price") is not None:
+            cand_curr = float(deal_row["current_price"])
+            if cand_curr > 0:
+                final_price = cand_curr
 
         if final_price is None:
             for cand in (
                     udata.get("latest_counter_offer"),
                     udata.get("last_proposed_price"),
-                    deal_row.get("agreed_price"),
-                    deal_row.get("current_price"),
                     udata.get("current_price"),
+                    deal_row.get("agreed_price"),
             ):
                 if cand is not None and float(cand) > 0:
                     final_price = float(cand)
@@ -303,9 +392,22 @@ class EquipmentRentalHandler:
             or "USD"
         ).upper().strip()
 
-        now_iso = datetime.now(timezone.utc).isoformat()
+        now_dt = datetime.now(timezone.utc)
+        now_iso = now_dt.isoformat()
+
         if db_client and hasattr(db_client, "table") and resolved_deal_id:
             try:
+                updated_history = list(history_list)
+                last_offer = updated_history[-1].get("offer") if updated_history else None
+                if final_price > 0 and (last_offer is None or float(last_offer) != final_price):
+                    updated_history.append({
+                        "time": now_dt.strftime("%Y-%m-%d %H:%M:%S.%f"),
+                        "actor": actor_id,
+                        "offer": final_price,
+                        "action": "accepted_offer",
+                        "currency": currency,
+                    })
+
                 update_payload: Dict[str, Any] = {
                     "current_price": final_price,
                     "agreed_price": final_price,
@@ -313,14 +415,23 @@ class EquipmentRentalHandler:
                     "status": "pending",
                     "updated_at": now_iso,
                 }
+                if updated_history:
+                    update_payload["negotiation_history"] = updated_history
+
                 await (
                     db_client.table("deals")
                     .update(update_payload)
                     .eq("id", resolved_deal_id)
                     .execute()
                 )
+
                 udata["current_price"] = final_price
                 udata["agreed_price"] = final_price
+                udata["latest_counter_offer"] = final_price
+                udata["last_proposed_price"] = final_price
+                if updated_history:
+                    udata["negotiation_history"] = updated_history
+
                 logger.info(
                     f"✅ Deal {resolved_deal_id} successfully synchronized with final agreed price: "
                     f"{final_price} {currency}"
@@ -513,7 +624,6 @@ class EquipmentRentalHandler:
         list_eq = None
 
         listing_id = None
-        _request_id = None
         _deal_data = {}
 
         # SINGLE SOURCE OF TRUTH: Query DB explicitly
@@ -545,9 +655,10 @@ class EquipmentRentalHandler:
 
                     listing_id = deal_data.get("listing_id")
                     request_id = deal_data.get("request_id")
-
-                    # Fetch Seeker Request Ground-Truth (Deployment Location & Requirements)
                     if request_id:
+                        context.user_data["active_request_id"] = request_id
+
+                        # Fetch Seeker Request Ground-Truth (Deployment Location & Requirements)
                         req_res = (
                             await self.db.table("seeker_requests")
                             .select(
