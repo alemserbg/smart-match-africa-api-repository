@@ -297,13 +297,80 @@ def get_moving_track_banner(step: int = 0) -> str:
     return f"🟩━{''.join(track)}━🟩"
 
 
+def _build_motion_banner(step: int) -> str:
+    """
+    Renders an animated moving track banner across steps using `get_moving_track_banner`
+    when available, with a safe fallback track renderer.
+    """
+    try:
+        rendered = get_moving_track_banner(step=step)
+        if rendered:
+            return str(rendered)
+    except Exception as banner_err:
+        logger.debug(f"Falling back to built-in motion banner at step {step}: {banner_err}")
+
+    track_len = 16
+    pos = step % track_len
+    lanes = ["🟩", "🟦", "🟨", "🟪"]
+    active_lane = lanes[(step // track_len) % len(lanes)]
+    cells = ["▫️"] * track_len
+    cells[pos] = active_lane
+    return f"[{''.join(cells)}]"
+
+
+def _render_repost_message(lang: str, banner: str, frame_badge: str = "") -> str:
+    """
+    Builds localized HTML message templates for English ('en'), Amharic ('am'),
+    and Afaan Oromo ('om') with live motion banner and Quick Capabilities.
+    """
+    badge_line = f" <i>{frame_badge}</i>" if frame_badge else ""
+
+    repost_texts = {
+        "en": (
+            f"<code>{banner}</code>{badge_line}\n"
+            f"⚡ <b>SMART MATCH AFRICA - DAILY MARKETPLACE UPDATE</b> ⚡\n\n"
+            f"Your permanent menu has been refreshed below.\n\n"
+            f"<b>Quick Capabilities:</b>\n"
+            f"- 🏠 <b>Housing:</b> List or find residential & commercial properties\n"
+            f"- 🚘 <b>Vehicles:</b> Offer or request personal & commercial vehicles\n"
+            f"- 🚜 <b>Equipment:</b> Heavy machinery & agricultural equipment\n"
+            f"- 📦 <b>Logistics:</b> Freight transport & city ride services\n\n"
+            f"👇 <b>Select an option from the keyboard below to start:</b>"
+        ),
+        "am": (
+            f"<code>{banner}</code>{badge_line}\n"
+            f"⚡ <b>ስማርት ማች አፍሪካ - የዕለት ገበያ ማሻሻያ</b> ⚡\n\n"
+            f"ቋሚ ምናሌዎ ከዚህ በታች ታድሷል።\n\n"
+            f"<b>ፈጣን አገልግሎቶች፦</b>\n"
+            f"- 🏠 <b>ቤቶች፦</b> የመኖሪያ እና የንግድ ቤቶችን ይመዝግቡ ወይም ይፈልጉ\n"
+            f"- 🚘 <b>ተሽከርካሪዎች፦</b> የግል እና የንግድ ተሽከርካሪዎችን ያቅርቡ ወይም ይጠይቁ\n"
+            f"- 🚜 <b>ማሽነሪዎች፦</b> ከባድ ማሽነሪዎችን እና የእርሻ መሳሪያዎችን ያግኙ\n"
+            f"- 📦 <b>ሎጂስቲክስ፦</b> የጭነት ትራንስፖርት እና የከተማ ታክሲ/ጉዞ አገልግሎቶች\n\n"
+            f"👇 <b>ለመጀመር ከታች ካለው ሰሌዳ (Keyboard) አንዱን አማራጭ ይምረጡ፦</b>"
+        ),
+        "om": (
+            f"<code>{banner}</code>{badge_line}\n"
+            f"⚡ <b>SMART MATCH AFRICA - HAAROMSA GABAA GUYYAA</b> ⚡\n\n"
+            f"Menuun keessan kan dhaabbataa ta'e armaan gadiitti haaromfameera.\n\n"
+            f"<b>Tajaajiloota Saffisaa:</b>\n"
+            f"- 🏠 <b>Manneen:</b> Manneen jireenyaa fi daldalaa galmeessaa ykn barbaadaa\n"
+            f"- 🚘 <b>Konkolaattota:</b> Konkolaattota dhuunfaa fi daldalaa dhiyeessaa ykn gaafadhaa\n"
+            f"- 🚜 <b>Meeshaalee:</b> Maashinoota guguddoo fi meeshaalee qonnaa\n"
+            f"- 📦 <b>Lojistikii:</b> Geejjiba fe'umsaa fi tajaajila imala magaalaa\n\n"
+            f"👇 <b>Jalqabuuf filannoo armaan gadii keessaa tokko filadhaa:</b>"
+        ),
+    }
+    return repost_texts.get(lang, repost_texts["en"])
+
+
 async def run_moving_banner_animation(
         bot,
         chat_id: int,
         message_id: int,
         base_text_generator,
         total_frames: int = 15,
-        interval_seconds: float = 2.0
+        interval_seconds: float = 2.0,
+        reply_markup: Any = None,
 ) -> None:
     """
     Robust background animator that loops through banner steps and updates the Telegram message live.
@@ -311,18 +378,19 @@ async def run_moving_banner_animation(
     """
     try:
         for step in range(total_frames):
-            banner = get_moving_track_banner(step=step)
-            updated_content = f"{banner}\n\n{base_text_generator(step)}"
+            banner = _build_motion_banner(step=step)
+            body_text = base_text_generator(step) if callable(base_text_generator) else str(base_text_generator)
+            updated_content = f"<code>{banner}</code>\n\n{body_text}"
 
             try:
                 await bot.edit_message_text(
                     chat_id=chat_id,
                     message_id=message_id,
                     text=updated_content,
-                    parse_mode="HTML"
+                    reply_markup=reply_markup,
+                    parse_mode="HTML",
                 )
             except Exception as edit_err:
-                # Handle Telegram 'not modified' harmless errors or rate limits gracefully
                 err_msg = str(edit_err).lower()
                 if "message is not modified" in err_msg:
                     pass
@@ -341,10 +409,63 @@ async def run_moving_banner_animation(
         logger.error(f"❌ Error in moving banner animation runner: {ex}", exc_info=True)
 
 
+async def _send_animated_menu_message(
+        bot: Any,
+        chat_id: int | str,
+        lang: str,
+        keyboard: Any,
+        base_step: int,
+        motion_frames: int = 3,
+        frame_interval: float = 0.25,
+        read_timeout: float = 30.0,
+        write_timeout: float = 30.0,
+) -> int:
+    """
+    Sends the initial menu card and animates the banner across a short sequence of frames
+    so users see real motion in Telegram, returning the next animation step.
+    """
+    frames_to_run = max(1, int(motion_frames))
+    first_banner = _build_motion_banner(base_step)
+    first_badge = f"▸ Frame 1/{frames_to_run}" if frames_to_run > 1 else ""
+    first_text = _render_repost_message(lang, first_banner, first_badge)
+
+    sent_msg = await bot.send_message(
+        chat_id=chat_id,
+        text=first_text,
+        reply_markup=keyboard,
+        parse_mode="HTML",
+        read_timeout=read_timeout,
+        write_timeout=write_timeout,
+    )
+
+    current_step = (base_step + 1) % 60
+    if frames_to_run > 1 and sent_msg and getattr(sent_msg, "message_id", None):
+        for frame_idx in range(2, frames_to_run + 1):
+            await asyncio.sleep(frame_interval)
+            next_banner = _build_motion_banner(current_step)
+            current_step = (current_step + 1) % 60
+            is_final = frame_idx == frames_to_run
+            badge = "" if is_final else f"▸ Frame {frame_idx}/{frames_to_run}"
+            frame_text = _render_repost_message(lang, next_banner, badge)
+            try:
+                await bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=sent_msg.message_id,
+                    text=frame_text,
+                    reply_markup=keyboard,
+                    parse_mode="HTML",
+                )
+            except TelegramError as edit_err:
+                logger.debug(f"Animation edit skipped for chat {chat_id} on frame {frame_idx}: {edit_err}")
+                break
+
+    return current_step
+
+
 async def run_daily_menu_repost_job(telegram_app: Any, db_client: AsyncClient) -> None:
     """
     Queries active users from Supabase in batches of 1,000 to prevent bottlenecks
-    and sends a refreshed persistent main menu at 3:00 AM EAT.
+    and sends a refreshed, animated persistent main menu at 3:00 AM EAT.
     """
     logger.info("🚀 Starting daily persistent main menu repost job (3:00 AM EAT)...")
 
@@ -352,22 +473,17 @@ async def run_daily_menu_repost_job(telegram_app: Any, db_client: AsyncClient) -
         logger.error("❌ Cannot execute daily menu repost: telegram_app is uninitialized.")
         return
 
-    # Dynamic import to prevent circular dependency issues
     from src.smartmatch.handlers.main_menu import MainMenuHandler
 
     bot = telegram_app.bot
     success_count = 0
     blocked_count = 0
-
-    # Frame step counter for moving track motion
     animation_step = 0
 
-    # Database pagination settings
     CHUNK_SIZE = 1000
     offset = 0
 
     while True:
-        # 1. Retrieve users in chunks of 1,000 to prevent RAM & DB bottlenecking
         try:
             res = (
                 await db_client.table("users")
@@ -375,7 +491,7 @@ async def run_daily_menu_repost_job(telegram_app: Any, db_client: AsyncClient) -
                 .range(offset, offset + CHUNK_SIZE - 1)
                 .execute()
             )
-            users_chunk = res.data if res and res.data else []
+            users_chunk = res.data if res and getattr(res, "data", None) else []
         except Exception as err:
             logger.error(f"❌ Database error fetching user chunk offset {offset}: {err}")
             break
@@ -387,65 +503,64 @@ async def run_daily_menu_repost_job(telegram_app: Any, db_client: AsyncClient) -
 
         for user in users_chunk:
             chat_id = user.get("telegram_id")
-            lang = user.get("language") if user.get("language") in ["en", "am", "om"] else "en"
-
             if not chat_id:
                 continue
 
-            # Render moving emoji motion on bold light green line header
-            banner = get_moving_track_banner(animation_step)
-            animation_step = (animation_step + 1) % 15
+            raw_lang = str(user.get("language") or "en").strip().lower()
+            lang = raw_lang if raw_lang in {"en", "am", "om"} else "en"
+            keyboard = MainMenuHandler.get_persistent_keyboard(lang)
 
-            # Multilingual message templates with top UI motion banner (Fixed Amharic string literal)
-            repost_texts = {
-                "en": (
-                    f"<code>{banner}</code>\n"
-                    f"⚡ <b>SMART MATCH AFRICA - DAILY MARKETPLACE UPDATE</b> ⚡\n\n"
-                    f"Your permanent menu has been refreshed below.\n\n"
-                    f"👇 <b>Select an option below to either list or request assets and services:</b>"
-                ),
-                "am": (
-                    f"<code>{banner}</code>\n"
-                    f"⚡ <b>ስማርት ማች አፍሪካ\nየዕለት ገበያ ማሻሻያ</b> ⚡\n\n"
-                    f"ቋሚ ማኑዩ ከዚህ በታች ታድሷል።\n\n"
-                    f"👇 <b>ንብረቶችን ወይም አገልግሎቶችን ለመመዝገብ ወይም ለመጠየቅ ከታች ካሉት አማራጮች አንዱን ይምረጡ፦</b>"
-                ),
-                "om": (
-                    f"<code>{banner}</code>\n"
-                    f"⚡ <b>SMART MATCH AFRICA - HAAROMSA GABOOWAA GUUTUU</b> ⚡\n\n"
-                    f"Menuun keessan kan dhaabbataa ta'e armaan gadiitti haaromfameera.\n\n"
-                    f"👇 <b>Qabeenya ykn tajaajila galmeessuuf ykn gaafachuuf filannoowwan armaan gadii keessaa tokko filadhaa:</b>"
-                )
-            }
-
-            repost_text = repost_texts[lang]
+            # Animate the first 25 deliveries per run to keep broadcast throughput fast & safe
+            frames_for_user = 3 if success_count < 25 else 1
 
             try:
-                keyboard = MainMenuHandler.get_persistent_keyboard(lang)
-                await bot.send_message(
+                animation_step = await _send_animated_menu_message(
+                    bot=bot,
                     chat_id=chat_id,
-                    text=repost_text,
-                    reply_markup=keyboard,
-                    parse_mode="HTML",
+                    lang=lang,
+                    keyboard=keyboard,
+                    base_step=animation_step,
+                    motion_frames=frames_for_user,
+                    frame_interval=0.25,
                     read_timeout=30.0,
-                    write_timeout=30.0
+                    write_timeout=30.0,
                 )
                 success_count += 1
-                # Rate limiting: Sleep 50ms between requests (~20 msgs/sec)
                 await asyncio.sleep(0.05)
 
+            except RetryAfter as e:
+                wait_secs = float(getattr(e, "retry_after", 5))
+                logger.warning(f"⚠️ Telegram Flood Control triggered. Sleeping for {wait_secs}s before retry.")
+                await asyncio.sleep(wait_secs)
+                try:
+                    animation_step = await _send_animated_menu_message(
+                        bot=bot,
+                        chat_id=chat_id,
+                        lang=lang,
+                        keyboard=keyboard,
+                        base_step=animation_step,
+                        motion_frames=1,
+                        read_timeout=30.0,
+                        write_timeout=30.0,
+                    )
+                    success_count += 1
+                    await asyncio.sleep(0.05)
+                except Exception as flood_retry_err:
+                    logger.warning(f"⚠️ Retry after Flood Control failed for User {chat_id}: {flood_retry_err}")
+                    blocked_count += 1
+
             except TimedOut:
-                # Retry once with extended timeout
                 await asyncio.sleep(1.0)
                 try:
-                    keyboard = MainMenuHandler.get_persistent_keyboard(lang)
-                    await bot.send_message(
+                    animation_step = await _send_animated_menu_message(
+                        bot=bot,
                         chat_id=chat_id,
-                        text=repost_text,
-                        reply_markup=keyboard,
-                        parse_mode="HTML",
+                        lang=lang,
+                        keyboard=keyboard,
+                        base_step=animation_step,
+                        motion_frames=1,
                         read_timeout=45.0,
-                        write_timeout=45.0
+                        write_timeout=45.0,
                     )
                     success_count += 1
                     await asyncio.sleep(0.05)
@@ -453,22 +568,19 @@ async def run_daily_menu_repost_job(telegram_app: Any, db_client: AsyncClient) -
                     logger.warning(f"⚠️ Failed to deliver persistent menu to User {chat_id} after retry: {retry_err}")
                     blocked_count += 1
 
-            except RetryAfter as e:
-                logger.warning(f"⚠️ Telegram Flood Control triggered. Sleeping for {e.retry_after} seconds.")
-                await asyncio.sleep(e.retry_after)
             except Forbidden:
                 blocked_count += 1
+
             except TelegramError as tg_err:
                 logger.warning(f"⚠️ Failed to deliver persistent menu to User {chat_id}: {tg_err}")
                 blocked_count += 1
+
             except Exception as e:
                 logger.error(f"❌ Unexpected error delivering persistent menu to User {chat_id}: {e}")
                 blocked_count += 1
 
-        # Advance chunk offset for next 1,000 users
         offset += CHUNK_SIZE
 
-        # Stop if current chunk was smaller than requested batch size
         if len(users_chunk) < CHUNK_SIZE:
             break
 
@@ -496,7 +608,8 @@ async def start_daily_menu_repost_loop(telegram_app: Any, db_client: AsyncClient
 
             seconds_until_next_run = max(1.0, (target_time - now_eat).total_seconds())
             logger.info(
-                f"⏳ Next daily menu repost scheduled in {seconds_until_next_run / 3600:.2f} hours (at {target_time.strftime('%Y-%m-%d %H:%M:%S %Z')})"
+                f"⏳ Next daily menu repost scheduled in {seconds_until_next_run / 3600:.2f} hours "
+                f"(at {target_time.strftime('%Y-%m-%d %H:%M:%S %Z')})"
             )
 
             await asyncio.sleep(seconds_until_next_run)
