@@ -195,35 +195,146 @@ class EquipmentRentalHandler:
         self.queue = queue_manager
         self.deals = deals_handler
 
-    @staticmethod
-    async def finalize_accepted_counter_offer(db_client, deal_id: str, final_agreed_price: float) -> bool:
+    async def finalize_accepted_counter_offer(
+            self,
+            update: Optional[Any] = None,
+            context: Optional[ContextTypes.DEFAULT_TYPE] = None,
+            deal_id: Optional[str] = None,
+            accepted_price: Optional[float] = None,
+    ) -> bool:
         """
-        Ensures the deals table stores the exact final agreed price using valid
-        schema columns ('agreed_price', 'current_price', 'status', 'deal_state', 'updated_at')
-        prior to triggering commission checkout generation.
+        Persists the accepted counter-offer price safely against `deals` columns and
+        `deal_status_type` enum constraints without triggering 22P02 errors prior to
+        commission checkout generation.
         """
-        try:
-            now_iso = datetime.now(timezone.utc).isoformat()
+        explicit_db_client: Optional[Any] = None
+        if update is not None and hasattr(update, "table"):
+            explicit_db_client = update
+            if isinstance(context, str) and deal_id is None:
+                deal_id = context
+                context = None
+            if isinstance(deal_id, (int, float)) and accepted_price is None:
+                accepted_price = float(deal_id)
+                deal_id = None
 
-            # Update only existing schema columns on `deals` (no `price` column exists in `deals`)
-            await db_client.table('deals').update({
-                'agreed_price': final_agreed_price,
-                'current_price': final_agreed_price,
-                'status': 'accepted',
-                'deal_state': 'accepted',
-                'updated_at': now_iso,
-            }).eq('id', deal_id).execute()
+        if update is not None and getattr(update, "effective_user", None):
+            logger.debug(
+                f"Finalizing accepted counter-offer triggered by user_id={update.effective_user.id}"
+            )
 
-            logger.info(
-                f"✅ Deal {deal_id} successfully synchronized with final agreed price: {final_agreed_price}"
-            )
-            return True
-        except Exception as e:
-            logger.error(
-                f"❌ Failed to synchronize final agreed price for deal {deal_id}: {e}",
-                exc_info=True,
-            )
-            return False
+        db_client = (
+                explicit_db_client
+                or getattr(self, "db", None)
+                or getattr(getattr(self, "db_manager", None), "supabase", None)
+        )
+        if hasattr(db_client, "supabase") and not hasattr(db_client, "table"):
+            db_client = db_client.supabase
+
+        udata: Dict[str, Any] = (
+            context.user_data
+            if context is not None and isinstance(context.user_data, dict)
+            else {}
+        )
+
+        resolved_deal_id = str(
+            deal_id
+            or udata.get("active_equipment_deal_id")
+            or udata.get("active_deal_id")
+            or ""
+        ).strip()
+
+        final_price: Optional[float] = None
+        if accepted_price is not None and float(accepted_price) > 0:
+            final_price = float(accepted_price)
+
+        deal_row: Dict[str, Any] = {}
+        if db_client and hasattr(db_client, "table") and resolved_deal_id:
+            try:
+                res = (
+                    await db_client.table("deals")
+                    .select(
+                        "id, current_price, agreed_price, currency, status, deal_state, negotiation_history"
+                    )
+                    .eq("id", resolved_deal_id)
+                    .maybe_single()
+                    .execute()
+                )
+                if isinstance(getattr(res, "data", None), dict):
+                    deal_row = res.data
+            except Exception as fetch_err:
+                logger.warning(f"Could not fetch deal '{resolved_deal_id}' before finalizing offer: {fetch_err}")
+
+        if final_price is None:
+            raw_history = deal_row.get("negotiation_history") or udata.get("negotiation_history")
+            if isinstance(raw_history, str):
+                try:
+                    raw_history = json.loads(raw_history)
+                except Exception:
+                    raw_history = None
+
+            if isinstance(raw_history, list) and raw_history:
+                for item in reversed(raw_history):
+                    if isinstance(item, dict):
+                        cand = (
+                            item.get("offer")
+                            if item.get("offer") is not None
+                            else (item.get("price") or item.get("offer_price") or item.get("amount"))
+                        )
+                        if cand is not None and float(cand) > 0:
+                            final_price = float(cand)
+                            break
+
+        if final_price is None:
+            for cand in (
+                    udata.get("latest_counter_offer"),
+                    udata.get("last_proposed_price"),
+                    deal_row.get("agreed_price"),
+                    deal_row.get("current_price"),
+                    udata.get("current_price"),
+            ):
+                if cand is not None and float(cand) > 0:
+                    final_price = float(cand)
+                    break
+
+        final_price = float(final_price or 0.0)
+        currency = str(
+            deal_row.get("currency")
+            or udata.get("currency")
+            or "USD"
+        ).upper().strip()
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        if db_client and hasattr(db_client, "table") and resolved_deal_id:
+            try:
+                update_payload: Dict[str, Any] = {
+                    "current_price": final_price,
+                    "agreed_price": final_price,
+                    "deal_state": "pending_payment",
+                    "status": "pending",
+                    "updated_at": now_iso,
+                }
+                await (
+                    db_client.table("deals")
+                    .update(update_payload)
+                    .eq("id", resolved_deal_id)
+                    .execute()
+                )
+                udata["current_price"] = final_price
+                udata["agreed_price"] = final_price
+                logger.info(
+                    f"✅ Deal {resolved_deal_id} successfully synchronized with final agreed price: "
+                    f"{final_price} {currency}"
+                )
+                return True
+            except Exception as sync_err:
+                logger.error(
+                    f"❌ Failed to synchronize final agreed price ({final_price} {currency}) "
+                    f"for deal {resolved_deal_id}: {sync_err}",
+                    exc_info=True,
+                )
+                return False
+
+        return False
 
     async def deal_accept_handler(
             self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -248,19 +359,18 @@ class EquipmentRentalHandler:
             logger.warning("deal_accept_handler received callback without a valid deal ID.")
             return None
 
-        # Fetch deal record directly from Supabase to ensure complete metadata
         deal_record = None
-        supabase_client = getattr(self.db, 'supabase', None) or getattr(self, 'db', None)
+        supabase_client = getattr(self.db, "supabase", None) or getattr(self, "db", None)
         if supabase_client and hasattr(supabase_client, "table"):
             try:
                 deal_res = (
-                    await supabase_client.table('deals')
-                    .select('*')
-                    .eq('id', deal_id_str)
+                    await supabase_client.table("deals")
+                    .select("*")
+                    .eq("id", deal_id_str)
                     .maybe_single()
                     .execute()
                 )
-                if deal_res and getattr(deal_res, 'data', None):
+                if deal_res and getattr(deal_res, "data", None):
                     deal_record = deal_res.data
             except Exception as d_err:
                 logger.warning(f"Failed to fetch deal {deal_id_str} in deal_accept_handler: {d_err}")
@@ -273,10 +383,9 @@ class EquipmentRentalHandler:
                 pass
             return None
 
-        # Resolve the freshest accepted counter-offer price across negotiation_history and deal columns
         final_agreed_price = None
-        resolved_currency = deal_record.get('currency')
-        history = deal_record.get('negotiation_history')
+        resolved_currency = deal_record.get("currency")
+        history = deal_record.get("negotiation_history")
         if isinstance(history, str):
             try:
                 history = json.loads(history)
@@ -287,40 +396,38 @@ class EquipmentRentalHandler:
             for entry in reversed(history):
                 if isinstance(entry, dict):
                     candidate = (
-                            entry.get('offer')
-                            or entry.get('proposed_price')
-                            or entry.get('price')
+                            entry.get("offer")
+                            or entry.get("proposed_price")
+                            or entry.get("price")
                     )
                     if candidate is not None and safe_float(candidate, 0.0) > 0:
                         final_agreed_price = candidate
-                        if entry.get('currency'):
-                            resolved_currency = str(entry.get('currency')).strip().upper()
+                        if entry.get("currency"):
+                            resolved_currency = str(entry.get("currency")).strip().upper()
                         break
 
         if not final_agreed_price:
             final_agreed_price = (
-                    deal_record.get('current_price')
-                    or deal_record.get('agreed_price')
+                    deal_record.get("current_price")
+                    or deal_record.get("agreed_price")
             )
 
-        # Synchronize final accepted price in Supabase and in-memory deal_record prior to execution
         if final_agreed_price is not None and supabase_client and hasattr(supabase_client, "table"):
             resolved_float_price = safe_float(final_agreed_price, 0.0)
             if resolved_float_price > 0:
                 await self.finalize_accepted_counter_offer(
-                    db_client=supabase_client,
+                    update=update,
+                    context=context,
                     deal_id=deal_id_str,
-                    final_agreed_price=resolved_float_price,
+                    accepted_price=resolved_float_price,
                 )
-                # Keep the in-memory dictionary aligned with `deals` schema columns for downstream handlers & billing
-                deal_record['agreed_price'] = resolved_float_price
-                deal_record['current_price'] = resolved_float_price
-                deal_record['status'] = 'accepted'
-                deal_record['deal_state'] = 'accepted'
+                deal_record["agreed_price"] = resolved_float_price
+                deal_record["current_price"] = resolved_float_price
+                deal_record["status"] = "pending"
+                deal_record["deal_state"] = "pending_payment"
                 if resolved_currency:
-                    deal_record['currency'] = resolved_currency
+                    deal_record["currency"] = resolved_currency
 
-        # Delegate directly to the robust centralized deal acceptance executor
         if hasattr(self, "execute_deal_acceptance"):
             return await self.execute_deal_acceptance(update, context, deal_id_str, deal_record)
         elif hasattr(self.deals, "execute_deal_acceptance"):

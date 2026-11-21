@@ -1939,20 +1939,23 @@ class DatabaseManager:
     ) -> bool:
         """
         Updates an active deal's state, current price, and negotiation history in Supabase.
-        Synchronizes `status` and `deal_state` and conditionally syncs provider_listings
-        and seeker_requests when finalized/completed/paid.
+        Maps `status` safely against `VALID_DEAL_STATUS_ENUM` while preserving granular
+        `deal_state` values, and conditionally syncs `provider_listings` and
+        `seeker_requests` when finalized/completed/paid.
         Returns True on success, False on failure.
         """
         if not self.supabase or not deal_id or str(deal_id).strip() in ("", "None", "none"):
             return False
 
+        VALID_DEAL_STATUS_ENUM = {"pending", "finalized"}
         deal_id_str = str(deal_id).strip()
         safe_state = str(deal_state).lower().strip()
+        db_status = safe_state if safe_state in VALID_DEAL_STATUS_ENUM else "pending"
         now_iso = datetime.now(timezone.utc).isoformat()
 
         payload: Dict[str, Any] = {
             "deal_state": safe_state,
-            "status": safe_state,
+            "status": db_status,
             "updated_at": now_iso,
         }
 
